@@ -229,4 +229,4 @@ hwp-mcp/
 
 ## 연락처
 
-프로젝트 관련 문의는 GitHub 이슈, [코난쌤](https://www.youtube.com/@conanssam)를 통해 해주세요. 
+프로젝트 관련 문의는 GitHub 이슈로 해주세요.
