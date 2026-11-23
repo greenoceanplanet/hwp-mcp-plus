@@ -6,13 +6,44 @@ win32com을 이용하여 한글 프로그램을 자동화합니다.
 import os
 import logging
 import win32com.client
+import win32com.client.dynamic
 import win32gui
 import win32con
 import time
 import pythoncom
 from typing import Optional, List, Dict, Any, Tuple
 
+try:
+    from src.tools.hwp_tracking import track_scope
+except ImportError:  # src/tools를 sys.path에 직접 넣어 실행하는 경우
+    from hwp_tracking import track_scope
+
 logger = logging.getLogger("hwp-controller")
+
+HWP_PROGID = "HWPFrame.HwpObject"
+
+
+def _late_bound(obj):
+    """
+    한글 COM 객체를 항상 늦은 바인딩(dynamic)으로 감쌉니다.
+
+    win32com.client.Dispatch/GetActiveObject는 gen_py 캐시(%TEMP%\\gen_py)에 한글 타입 라이브러리가
+    생성돼 있으면 조용히 이른 바인딩 객체를 돌려줍니다. 캐시는 같은 파이썬 버전의 다른 프로그램
+    (예: pyhwpx)이 만들어도 공유됩니다. 이른 바인딩에서는 타입 라이브러리에 없는 이름
+    (예: 일부 HParameterSet 항목)을 찾지 못해 AttributeError가 나므로, 캐시 유무와 관계없이
+    늦은 바인딩으로 고정합니다.
+    """
+    return win32com.client.dynamic.Dispatch(getattr(obj, "_oleobj_", obj))
+
+
+def _new_hwp_object():
+    """새 한글 인스턴스를 늦은 바인딩으로 만듭니다."""
+    return win32com.client.dynamic.Dispatch(HWP_PROGID)
+
+
+def _active_hwp_object():
+    """실행 중인 한글 인스턴스(GetActiveObject)를 늦은 바인딩으로 가져옵니다."""
+    return _late_bound(win32com.client.GetActiveObject(HWP_PROGID))
 
 
 class HwpController:
@@ -25,40 +56,171 @@ class HwpController:
         self.is_hwp_running = False
         self.current_document_path = None
 
+    # 노티/헬퍼 창 제목 (실제 문서 창이 아님)
+    _HWP_NONDOC_TITLES = {"SystemResourceNotifyWindow", "MediaContextNotificationWindow"}
+
+    @staticmethod
+    def _is_hwp_window_class(cls: str) -> bool:
+        """
+        창 클래스명이 한글(hwp.exe) 창인지 판별합니다.
+
+        한글 2020+ 는 클래스명이 'HwndWrapper[hwp.exe;;<GUID>]' 형태이고,
+        구버전/COM 프레임은 'HwpFrame' 입니다. 둘 다 인식합니다.
+        """
+        if not cls:
+            return False
+        low = cls.lower()
+        return "hwp.exe" in low or cls == "HwpFrame" or low.startswith("hwpframe")
+
+    def _find_hwp_document_windows(self) -> List[Dict[str, Any]]:
+        """
+        실행 중인 한글 '문서' 창들을 찾습니다.
+
+        보이는(visible) 창이면서 의미 있는 제목이 있는 것만 반환합니다.
+        (노티/헬퍼 창과 숨은 창은 제외)
+
+        Returns:
+            List[Dict]: [{"hwnd": int, "title": str, "class": str}, ...]
+        """
+        results = []
+
+        def _enum(hwnd, acc):
+            try:
+                cls = win32gui.GetClassName(hwnd)
+                if not self._is_hwp_window_class(cls):
+                    return True
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                title = win32gui.GetWindowText(hwnd)
+                if not title or title in self._HWP_NONDOC_TITLES:
+                    return True
+                acc.append({"hwnd": hwnd, "title": title, "class": cls})
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum, results)
+        except Exception as e:
+            logger.debug(f"한글 창 열거 실패 (무시): {e}")
+        return results
+
+    def _hwp_window_exists(self) -> bool:
+        """
+        실행 중인 한글 문서 창이 있는지 확인합니다.
+
+        새 인스턴스를 만들지 않고, 이미 떠 있는 한글이 있는지만 판별합니다.
+
+        Returns:
+            bool: 한글 문서 창이 하나 이상 존재하면 True
+        """
+        return len(self._find_hwp_document_windows()) > 0
+
     def connect(self, visible: bool = True, register_security_module: bool = True) -> bool:
         """
         한글 프로그램에 연결합니다.
 
-        Args:
-            visible (bool): 한글 창을 화면에 표시할지 여부
-            register_security_module (bool): 보안 모듈을 등록할지 여부
-
-        Returns:
-            bool: 연결 성공 여부
+        실행 중인 한글 창이 있으면 그 인스턴스에 연결(attach)하며,
+        절대 빈 새 창을 만들지 않습니다. 한글이 전혀 실행 중이지 않을 때만
+        새 인스턴스를 시작합니다.
         """
         try:
-            # GetActiveObject 시도
+            # 연결 전에 이미 실행 중인 한글 창이 있는지 먼저 확인
+            hwp_running = self._hwp_window_exists()
+            self.hwp = None
+
+            # 1. ROT(Running Object Table)를 검색하여 한글 인스턴스 찾기
             try:
-                self.hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
-                logger.info("GetActiveObject 성공 - 기존 HWP 인스턴스에 연결됨")
-            except Exception as e:
-                logger.warning(f"GetActiveObject 실패: {e}")
-                # Dispatch는 새 창을 열 수 있음 - HWP의 한계
-                self.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
-                logger.info("Dispatch로 HWP에 연결됨 (새 창이 열렸을 수 있음)")
+                pythoncom.CoInitialize()
+            except Exception:
+                pass
+
+            context = pythoncom.CreateBindCtx(0)
+            rot = pythoncom.GetRunningObjectTable()
             
+            # 실제 문서(경로가 있는 문서)가 열려있는 HWP 인스턴스를 우선 찾음
+            best_hwp = None
+            first_hwp = None
+            for moniker in rot:
+                name = moniker.GetDisplayName(context, None)
+                if 'hwpobject' in name.lower():
+                    try:
+                        obj = rot.GetObject(moniker)
+                        hwp_candidate = _late_bound(obj.QueryInterface(pythoncom.IID_IDispatch))
+                        if first_hwp is None:
+                            first_hwp = hwp_candidate
+                        
+                        doc_count = hwp_candidate.XHwpDocuments.Count
+                        for i in range(doc_count):
+                            doc = hwp_candidate.XHwpDocuments.Item(i)
+                            if doc.Path:
+                                best_hwp = hwp_candidate
+                                logger.info(f"ROT에서 문서가 열려있는 한글 인스턴스 발견: {name} (Doc {i}: {doc.Path})")
+                                # 문서 탭 전환만 (커서 이동 없이)
+                                try:
+                                    for _ in range(i):
+                                        hwp_candidate.HAction.Run("WindowNext")
+                                except Exception as e_act:
+                                    logger.debug(f"문서 탭 전환 실패: {e_act}")
+                                break
+                        if best_hwp:
+                            break
+                    except Exception as e_rot:
+                        logger.debug(f"ROT 객체 바인딩 실패: {e_rot}")
+
+            if best_hwp:
+                self.hwp = best_hwp
+            elif first_hwp:
+                self.hwp = first_hwp
+                logger.info("ROT에서 기본 한글 인스턴스에 연결됨")
+
+            # 2. ROT에서 찾지 못한 경우 GetActiveObject 시도
+            if self.hwp is None:
+                last_err = None
+                for attempt in range(5):
+                    try:
+                        pythoncom.PumpWaitingMessages()
+                        self.hwp = _active_hwp_object()
+                        logger.info(f"GetActiveObject 성공 - 기존 HWP 인스턴스에 연결됨 (시도 {attempt + 1})")
+                        break
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(0.3)
+
+            # 3. 그래도 없으면 Dispatch (새로 생성)
+            is_new_instance = False
+            if self.hwp is None:
+                if hwp_running:
+                    # 한글이 떠 있는데 attach 실패 → 새 창을 만들지 않고 실패 반환
+                    logger.error(f"실행 중인 한글에 연결 실패 (새 창 생성 방지): {last_err}")
+                    print("실행 중인 한글 창을 인식했으나 연결에 실패했습니다. "
+                          "한글 창을 한 번 클릭해 활성화한 뒤 다시 시도하세요.")
+                    return False
+                # 실행 중인 한글이 전혀 없을 때만 새 인스턴스 시작
+                self.hwp = _new_hwp_object()
+                is_new_instance = True
+                logger.info("실행 중인 한글이 없어 새 HWP 인스턴스를 시작함")
+
             # 보안 모듈 등록 (파일 경로 체크 보안 경고창 방지)
             if register_security_module:
                 try:
-                    # 보안 모듈 DLL 경로 - 실제 파일이 위치한 경로로 수정 필요
-                    module_path = os.path.abspath("D:/hwp-mcp/security_module/FilePathCheckerModuleExample.dll")
-                    self.hwp.RegisterModule("FilePathCheckerModuleExample", module_path)
-                    print("보안 모듈이 등록되었습니다.")
+                    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    module_path = os.path.join(repo_root, "security_module", "FilePathCheckerModuleExample.dll")
+                    if os.path.exists(module_path):
+                        self.hwp.RegisterModule("FilePathCheckerModuleExample", module_path)
+                        print("보안 모듈이 등록되었습니다.")
+                    else:
+                        logger.warning(f"보안 모듈 DLL을 찾을 수 없음 (무시): {module_path}")
                 except Exception as e:
                     print(f"보안 모듈 등록 실패 (무시하고 계속 진행): {e}")
-            
+
             self.visible = visible
-            self.hwp.XHwpWindows.Item(0).Visible = visible
+            # 새로 만든 인스턴스만 Visible 설정 — 기존 창은 건드리지 않아 전체화면 등 유지
+            if is_new_instance:
+                try:
+                    self.hwp.XHwpWindows.Item(0).Visible = visible
+                except Exception as e_vis:
+                    logger.debug(f"Visible 설정 실패: {e_vis}")
             self.is_hwp_running = True
             return True
         except Exception as e:
@@ -324,24 +486,8 @@ class HwpController:
                 except Exception as e:
                     logger.debug(f"현재 WindowHandle 조회 실패 (무시): {e}")
 
-            # 모든 HWP 윈도우 찾기
-            def enum_hwp_windows(hwnd, results):
-                try:
-                    class_name = win32gui.GetClassName(hwnd)
-                    if class_name == "HwpFrame" or "Hwp" in class_name:
-                        title = win32gui.GetWindowText(hwnd)
-                        if title:  # 제목이 있는 창만
-                            results.append({
-                                "hwnd": hwnd,
-                                "title": title,
-                                "class": class_name
-                            })
-                except Exception as e:
-                    logger.debug(f"창 정보 조회 실패 hwnd={hwnd}: {e}")
-                return True
-
-            hwp_windows = []
-            win32gui.EnumWindows(enum_hwp_windows, hwp_windows)
+            # 실제 문서 창만 찾기 (노티/헬퍼 창 제외, 최신/구버전 클래스 모두 인식)
+            hwp_windows = self._find_hwp_document_windows()
 
             for i, win in enumerate(hwp_windows):
                 instances.append({
@@ -376,9 +522,19 @@ class HwpController:
             # 해당 윈도우를 최상위로 가져오기
             try:
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                
+                # ALT key trick to bypass Windows SetForegroundWindow restrictions
+                try:
+                    import win32com.client
+                    shell = win32com.client.Dispatch("WScript.Shell")
+                    shell.SendKeys('%')
+                    time.sleep(0.1)
+                except Exception as e_sendkeys:
+                    logger.debug(f"SendKeys 실패: {e_sendkeys}")
+                    
                 win32gui.SetForegroundWindow(hwnd)
             except Exception as e:
-                return False, f"창 활성화 실패: {e}"
+                logger.warning(f"창 활성화 실패 (계속 진행): {e}")
 
             time.sleep(0.5)
 
@@ -388,9 +544,35 @@ class HwpController:
             except Exception as e:
                 logger.debug(f"CoInitialize: {e}")  # 이미 초기화된 경우
 
+            # 1. ROT에서 창 핸들(hwnd)이 일치하는 HWP 인스턴스 검색
+            found_hwp = None
+            try:
+                context = pythoncom.CreateBindCtx(0)
+                rot = pythoncom.GetRunningObjectTable()
+                for moniker in rot:
+                    name = moniker.GetDisplayName(context, None)
+                    if 'hwpobject' in name.lower():
+                        try:
+                            obj = rot.GetObject(moniker)
+                            hwp_candidate = _late_bound(obj.QueryInterface(pythoncom.IID_IDispatch))
+                            hwp_hwnd = hwp_candidate.XHwpWindows.Item(0).WindowHandle
+                            if hwp_hwnd == hwnd:
+                                found_hwp = hwp_candidate
+                                logger.info(f"ROT에서 요청된 hwnd({hwnd})와 일치하는 한글 인스턴스 발견: {name}")
+                                break
+                        except Exception:
+                            pass
+            except Exception as e_rot:
+                logger.debug(f"ROT 검색 중 오류 (일반 매칭으로 폴백): {e_rot}")
+
+            if found_hwp:
+                self.hwp = found_hwp
+                self.is_hwp_running = True
+                return True, f"HWP 인스턴스(hwnd: {hwnd})에 연결됨: {title}"
+
             # 방법 1: GetActiveObject 시도
             try:
-                self.hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+                self.hwp = _active_hwp_object()
                 self.is_hwp_running = True
                 logger.info(f"GetActiveObject 성공: {title}")
                 return True, f"HWP 인스턴스에 연결됨: {title}"
@@ -399,7 +581,7 @@ class HwpController:
 
             # 방법 2: Dispatch로 연결 (활성화된 HWP에 연결됨)
             try:
-                self.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+                self.hwp = _new_hwp_object()
                 self.is_hwp_running = True
                 logger.info(f"Dispatch로 연결됨")
                 # Dispatch 후 현재 문서 경로로 확인
@@ -484,9 +666,13 @@ class HwpController:
             
             if file_path:
                 abs_path = os.path.abspath(file_path)
+                fmt = self.save_format_for(abs_path)
                 # 파일 형식과 경로 모두 지정하여 저장
-                self.hwp.SaveAs(abs_path, "HWP", "")
-                self.current_document_path = abs_path
+                result = self.hwp.SaveAs(abs_path, fmt, "")
+                if result is False:
+                    return False
+                if fmt != "PDF":  # PDF는 내보내기일 뿐 편집 중인 문서 경로는 그대로
+                    self.current_document_path = abs_path
             else:
                 if self.current_document_path:
                     self.hwp.Save()
@@ -500,21 +686,80 @@ class HwpController:
             print(f"문서 저장 실패: {e}")
             return False
 
-    def insert_text(self, text: str, preserve_linebreaks: bool = True) -> bool:
+    @staticmethod
+    def save_format_for(path: str) -> str:
+        """확장자로 SaveAs 형식 이름을 정합니다(.pdf→PDF, .hwpx→HWPX, 그 밖→HWP)."""
+        ext = os.path.splitext(path)[1].lower()
+        return {".pdf": "PDF", ".hwpx": "HWPX"}.get(ext, "HWP")
+
+    def get_active_document_path(self) -> str:
+        """현재 편집 중인 문서의 파일 경로. 한 번도 저장하지 않은 새 문서면 ""."""
+        try:
+            path = self.hwp.XHwpDocuments.Active_XHwpDocument.FullName
+            if path:
+                return str(path)
+        except Exception:
+            pass
+        try:
+            return str(self.hwp.Path or "")
+        except Exception:
+            return ""
+
+    def save_current_document(self) -> Tuple[bool, str]:
         """
-        현재 커서 위치에 텍스트를 삽입합니다.
-        
-        Args:
-            text (str): 삽입할 텍스트
-            preserve_linebreaks (bool): 줄바꿈 유지 여부
-            
-        Returns:
-            bool: 삽입 성공 여부
+        현재 문서를 원래 파일에 저장합니다(덮어쓰기).
+        새 문서(경로 없음)면 저장하지 않고 실패를 돌려줍니다(대화창을 띄우지 않음).
         """
         try:
             if not self.is_hwp_running:
-                return False
-            
+                return False, "한글이 실행 중이 아닙니다."
+            path = self.get_active_document_path()
+            if not path:
+                return False, "아직 저장한 적 없는 새 문서입니다. path를 지정하세요."
+            result = self.hwp.Save(False)  # False=변경 여부와 관계없이 저장(True면 변경 없을 때 False 반환)
+            if result is False:
+                return False, f"저장 실패: {path}"
+            self.current_document_path = path
+            return True, path
+        except Exception as e:
+            logger.error(f"현재 문서 저장 실패: {e}")
+            return False, str(e)
+
+    def insert_text(self, text: str, preserve_linebreaks: bool = True, track: Optional[bool] = None) -> bool:
+        """
+        현재 커서 위치에 텍스트를 삽입합니다.
+
+        Args:
+            text (str): 삽입할 텍스트
+            preserve_linebreaks (bool): 줄바꿈 유지 여부
+            track (bool|None): None이면 문서의 현재 변경 추적 설정을 그대로 따름.
+                True/False면 삽입하는 동안만 그 값으로 두고 끝나면 원래 값으로 되돌림.
+
+        Returns:
+            bool: 삽입 성공 여부
+        """
+        if not self.is_hwp_running:
+            return False
+        with track_scope(self.hwp, track):
+            return self._insert_text_impl(text, preserve_linebreaks)
+
+    def _insert_text_impl(self, text: str, preserve_linebreaks: bool = True) -> bool:
+        try:
+            # 블록(선택 영역)이 있는 경우 먼저 삭제(변경 추적이 켜져 있으면 삭제 표시) 진행
+            try:
+                selected = self.get_selected_text()
+                if selected:
+                    logger.info("선택 영역 감지됨. 삭제(취소선) 처리 후 삽입합니다.")
+                    
+                    # 만약 선택 영역이 말머리표/번호로 시작하고, 삽입할 텍스트도 말머리표/번호로 시작하면 중복 방지를 위해 삽입 텍스트에서 제거
+                    if self._has_leading_bullet(selected) and self._has_leading_bullet(text):
+                        logger.info("말머리표 중복 감지: 삽입 텍스트에서 말머리표를 제거합니다.")
+                        text = self._strip_leading_bullet(text)
+                        
+                    self.hwp.Run("Delete")
+            except Exception as e_del:
+                logger.warning(f"선택 영역 사전 삭제 실패: {e_del}")
+
             if preserve_linebreaks and '\n' in text:
                 # 줄바꿈이 포함된 경우 줄 단위로 처리
                 lines = text.split('\n')
@@ -716,38 +961,6 @@ class HwpController:
             print(f"표 삽입 실패: {e}")
             return False
 
-    def insert_image(self, image_path: str, width: int = 0, height: int = 0) -> bool:
-        """
-        현재 커서 위치에 이미지를 삽입합니다.
-        
-        Args:
-            image_path (str): 이미지 파일 경로
-            width (int): 이미지 너비(0이면 원본 크기)
-            height (int): 이미지 높이(0이면 원본 크기)
-            
-        Returns:
-            bool: 삽입 성공 여부
-        """
-        try:
-            if not self.is_hwp_running:
-                return False
-            
-            abs_path = os.path.abspath(image_path)
-            if not os.path.exists(abs_path):
-                print(f"이미지 파일을 찾을 수 없습니다: {abs_path}")
-                return False
-                
-            self.hwp.HAction.GetDefault("InsertPicture", self.hwp.HParameterSet.HInsertPicture.HSet)
-            self.hwp.HParameterSet.HInsertPicture.FileName = abs_path
-            self.hwp.HParameterSet.HInsertPicture.Width = width
-            self.hwp.HParameterSet.HInsertPicture.Height = height
-            self.hwp.HParameterSet.HInsertPicture.Embed = 1  # 0: 링크, 1: 파일 포함
-            self.hwp.HAction.Execute("InsertPicture", self.hwp.HParameterSet.HInsertPicture.HSet)
-            return True
-        except Exception as e:
-            print(f"이미지 삽입 실패: {e}")
-            return False
-
     def undo(self, count: int = 1) -> Tuple[bool, str]:
         """
         실행 취소(Undo)를 수행합니다.
@@ -843,14 +1056,15 @@ class HwpController:
     def replace_text(self, find_text: str, replace_text: str, replace_all: bool = True) -> bool:
         """
         문서에서 텍스트를 찾아 바꿉니다.
+        Find → 선택 → 삭제 → 삽입 방식으로 동작하여 변경 추적 모드에서도 정상 작동합니다.
 
         Args:
             find_text (str): 찾을 텍스트
             replace_text (str): 바꿀 텍스트
-            replace_all (bool): 모두 바꾸기 여부
+            replace_all (bool): 사용하지 않음 (하위 호환 유지용)
 
         Returns:
-            bool: 바꾸기 성공 여부 (예외가 없으면 성공으로 간주)
+            bool: 바꾸기 성공 여부
         """
         try:
             if not self.is_hwp_running:
@@ -859,16 +1073,27 @@ class HwpController:
             # 문서 처음으로 이동
             self.hwp.HAction.Run("MoveDocBegin")
 
+            # 텍스트 찾기 (찾으면 해당 범위가 선택됨)
             pset = self.hwp.HParameterSet.HFindReplace
-            self.hwp.HAction.GetDefault("AllReplace", pset.HSet)
+            self.hwp.HAction.GetDefault("RepeatFind", pset.HSet)
             pset.FindString = find_text
-            pset.ReplaceString = replace_text
             pset.FindRegExp = 0
             pset.IgnoreMessage = 1
+            pset.Direction = 0
+            found = self.hwp.HAction.Execute("RepeatFind", pset.HSet)
 
-            # Note: HWP COM API의 AllReplace는 성공해도 False를 반환함
-            # 예외가 발생하지 않으면 성공으로 간주
-            self.hwp.HAction.Execute("AllReplace", pset.HSet)
+            if not found:
+                return False
+
+            # 선택된 텍스트를 새 텍스트로 교체 (변경 추적 시 삭제+삽입으로 기록됨)
+            if replace_text:
+                pset2 = self.hwp.HParameterSet.HInsertText
+                self.hwp.HAction.GetDefault("InsertText", pset2.HSet)
+                pset2.Text = replace_text
+                self.hwp.HAction.Execute("InsertText", pset2.HSet)
+            else:
+                # 빈 문자열로 교체 = 선택 텍스트 삭제
+                self.hwp.HAction.Run("Delete")
             return True
         except Exception as e:
             print(f"텍스트 바꾸기 실패: {e}")
@@ -885,10 +1110,41 @@ class HwpController:
             if not self.is_hwp_running:
                 return ""
             
-            return self.hwp.GetTextFile("TEXT", "")
+            # 선택 영역이 있는 경우 GetTextFile(..., "")가 None을 반환하므로 선택 해제
+            # (_get_text_file_safe가 TEXT 요청을 UNICODE로 읽어 한글 깨짐을 막음)
+            try:
+                self.hwp.Run("Cancel")
+            except Exception:
+                pass
+
+            return self._get_text_file_safe("TEXT", "")
         except Exception as e:
-            print(f"텍스트 가져오기 실패: {e}")
+            logger.error(f"텍스트 가져오기 실패: {e}")
             return ""
+
+    def get_text_range(self, start_text: str = "", max_chars: int = 0) -> Tuple[bool, str]:
+        """
+        문서 전체 텍스트에서 start_text가 처음 나오는 곳부터 max_chars 글자만 돌려줍니다.
+
+        - start_text가 비면 문서 처음부터.
+        - max_chars가 0 이하면 끝까지.
+        전체 텍스트는 get_text()(→ _get_text_file_safe)로 읽으므로 변경 추적 문서에서도 대화창이 뜨지 않습니다.
+
+        Returns:
+            (성공여부, 텍스트 또는 오류 메시지)
+        """
+        text = self.get_text()
+        if text is None:
+            return False, "문서 텍스트를 읽지 못했습니다."
+        start = 0
+        if start_text:
+            start = text.find(start_text)
+            if start < 0:
+                return False, f"시작 글자를 찾지 못했습니다: {start_text}"
+        part = text[start:]
+        if max_chars and max_chars > 0:
+            part = part[:max_chars]
+        return True, part
 
     def set_page_setup(self, orientation: str = "portrait", margin_left: int = 1000, 
                      margin_right: int = 1000, margin_top: int = 1000, margin_bottom: int = 1000) -> bool:
@@ -1031,6 +1287,133 @@ class HwpController:
         except Exception as e:
             print(f"텍스트 선택 실패: {e}")
             return False
+
+    def _get_text_file_safe(self, fmt: str, option: str) -> str:
+        """
+        GetTextFile 호출 전후로 메시지박스를 억제합니다.
+
+        변경 추적이 켜진 문서에서 TEXT 형식으로 읽을 때
+        '형식 변환 시 변경추적 정보 손실' 경고창이 뜨는 것을 방지합니다.
+
+        "TEXT" 형식은 CP949 바이트를 한 바이트씩 글자로 담아 돌려주므로
+        한글이 'ÁÖ°Å¾ÈÁ¤'처럼 깨집니다. 그래서 "TEXT" 요청은 "UNICODE"로 읽고,
+        UNICODE가 실패할 때만 TEXT로 읽어 latin-1 → cp949로 되돌립니다.
+        """
+        try:
+            self.hwp.SetMessageBoxMode(0x00010000)  # 대화창 자동 확인(OK)
+        except Exception:
+            pass
+        try:
+            if fmt.upper() == "TEXT":
+                result = None
+                try:
+                    result = self.hwp.GetTextFile("UNICODE", option)
+                except Exception as e:
+                    logger.warning(f"GetTextFile UNICODE 실패, TEXT로 재시도: {e}")
+                if result is None:
+                    result = self._fix_ansi_mojibake(self.hwp.GetTextFile("TEXT", option))
+            else:
+                result = self.hwp.GetTextFile(fmt, option)
+        finally:
+            try:
+                self.hwp.SetMessageBoxMode(0x00000000)
+            except Exception:
+                pass
+        return result or ""
+
+    @staticmethod
+    def _fix_ansi_mojibake(text):
+        """CP949 바이트가 latin-1 글자로 담긴 문자열을 원래 한글로 되돌립니다."""
+        if not text:
+            return text
+        try:
+            return text.encode("latin-1").decode("cp949")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return text
+
+    def get_selected_text(self) -> str:
+        """
+        현재 선택(블록 지정)된 텍스트만 반환합니다.
+
+        사용자가 한글 창에서 마우스로 드래그해 선택한 영역의 텍스트를 가져옵니다.
+        선택된 영역이 없으면 빈 문자열을 반환합니다.
+
+        Returns:
+            str: 선택된 텍스트 (없으면 "")
+        """
+        try:
+            if not self.is_hwp_running:
+                return ""
+
+            return self._get_text_file_safe("TEXT", "saveblock")
+        except Exception as e:
+            print(f"선택 텍스트 가져오기 실패: {e}")
+            return ""
+
+    def get_current_paragraph_text(self) -> str:
+        """
+        커서가 위치한 현재 문단의 전체 텍스트를 반환합니다.
+
+        커서 위치를 보존합니다(읽기만 하고 원위치로 복귀).
+
+        Returns:
+            str: 현재 문단 텍스트 (실패 시 "")
+        """
+        try:
+            if not self.is_hwp_running:
+                return ""
+
+            saved_pos = self.hwp.GetPos()
+
+            # 문단 시작으로 이동 후, 문단 끝까지 선택
+            self.hwp.Run("MoveParaBegin")
+            self.hwp.Run("MoveSelParaEnd")
+            text = self._get_text_file_safe("TEXT", "saveblock")
+
+            # 선택 해제 및 커서 원위치 복원
+            self.hwp.Run("Cancel")
+            if saved_pos:
+                self.hwp.SetPos(*saved_pos)
+
+            return text
+        except Exception as e:
+            print(f"현재 문단 텍스트 가져오기 실패: {e}")
+            return ""
+
+    def get_cursor_context(self) -> dict:
+        """
+        현재 커서를 기준으로 같은 문단 내 앞쪽/뒤쪽 텍스트(문맥)를 반환합니다.
+
+        AI가 "이어쓰기"나 "이 위치 기준 교정"을 할 때 맥락 파악용으로 사용합니다.
+        커서 위치를 보존합니다.
+
+        Returns:
+            dict: {"before": 앞쪽 텍스트, "after": 뒤쪽 텍스트}
+        """
+        try:
+            if not self.is_hwp_running:
+                return {"before": "", "after": ""}
+
+            saved_pos = self.hwp.GetPos()
+
+            # 뒤쪽 문맥: 커서 → 문단 끝까지 선택
+            self.hwp.Run("MoveSelParaEnd")
+            after = self._get_text_file_safe("TEXT", "saveblock")
+            self.hwp.Run("Cancel")
+            if saved_pos:
+                self.hwp.SetPos(*saved_pos)
+
+            # 앞쪽 문맥: 커서 → 문단 시작까지 선택
+            self.hwp.Run("MoveSelParaBegin")
+            before = self._get_text_file_safe("TEXT", "saveblock")
+            self.hwp.Run("Cancel")
+            if saved_pos:
+                self.hwp.SetPos(*saved_pos)
+
+            return {"before": before, "after": after}
+        except Exception as e:
+            print(f"커서 문맥 가져오기 실패: {e}")
+            return {"before": "", "after": ""}
 
     def fill_cell_next_to_label(
         self,
@@ -1568,3 +1951,151 @@ class HwpController:
             results[path_str] = (success, message)
 
         return results
+
+    def get_current_page(self) -> int:
+        """커서가 있는 쪽 번호(1부터, 실제 쪽 순서)를 반환합니다. 알 수 없으면 1."""
+        try:
+            info = self.hwp.XHwpDocuments.Active_XHwpDocument.XHwpDocumentInfo
+            return int(info.CurrentPage) + 1
+        except Exception as e:
+            logger.debug(f"현재 쪽 번호 확인 실패: {e}")
+            return 1
+
+    def create_page_image(self, out_path: str, page: int, resolution: int = 96) -> Tuple[bool, str]:
+        """
+        한글이 그린 모습 그대로 한 쪽을 이미지 파일로 저장합니다.
+
+        Args:
+            out_path: 저장할 경로(.png 권장, .bmp/.gif도 가능)
+            page: 쪽 번호(1부터, 문서 안의 실제 쪽 순서. 쪽 번호 매기기와 무관)
+            resolution: DPI (24~300)
+        """
+        try:
+            if not self.is_hwp_running:
+                return False, "한글에 연결되어 있지 않습니다."
+            page_count = int(self.hwp.PageCount)
+            if page < 1 or page > page_count:
+                return False, f"쪽 번호는 1~{page_count} 사이여야 합니다(요청: {page})."
+            resolution = max(24, min(300, int(resolution)))
+
+            out_path = os.path.abspath(out_path)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            ext = os.path.splitext(out_path)[1].lower().lstrip(".")
+
+            # 한글의 CreatePageImage는 bmp/gif만 지원(쪽 번호는 0부터)
+            if ext in ("bmp", "gif"):
+                ok = self.hwp.CreatePageImage(out_path, page - 1, resolution, 24, ext)
+                if not ok or not os.path.exists(out_path):
+                    return False, "한글이 쪽 이미지를 만들지 못했습니다."
+                return True, out_path
+
+            from PIL import Image as PILImage
+            tmp_bmp = os.path.splitext(out_path)[0] + ".__tmp__.bmp"
+            try:
+                ok = self.hwp.CreatePageImage(tmp_bmp, page - 1, resolution, 24, "bmp")
+                if not ok or not os.path.exists(tmp_bmp):
+                    return False, "한글이 쪽 이미지를 만들지 못했습니다."
+                with PILImage.open(tmp_bmp) as img:
+                    img.convert("RGB").save(out_path, format="JPEG" if ext in ("jpg", "jpeg") else "PNG")
+            finally:
+                if os.path.exists(tmp_bmp):
+                    os.remove(tmp_bmp)
+            return True, out_path
+        except Exception as e:
+            logger.error(f"쪽 이미지 생성 실패: {e}", exc_info=True)
+            return False, str(e)
+
+    def set_track_changes(self, active: bool) -> bool:
+        """
+        변경 내용 추적(Track Changes) 기능을 설정합니다.
+        """
+        try:
+            if not self.is_hwp_running:
+                return False
+            self.hwp.IsTrackChange = 1 if active else 0
+            return True
+        except Exception as e:
+            logger.error(f"변경 내용 추적 설정 실패: {e}")
+            return False
+
+    def set_paragraph_shape(
+        self,
+        heading_type: str = None,
+        alignment: str = None,
+        line_spacing: int = None,
+        left_margin: int = None,
+        right_margin: int = None,
+        first_line: int = None,
+        space_before: int = None,
+        space_after: int = None,
+        apply_to_all: bool = False,
+    ) -> bool:
+        """현재 커서 또는 선택 문단의 모양을 설정합니다. 지정된 값만 변경됩니다."""
+        _HEADING = {"none": 0, "outline": 1, "number": 2, "bullet": 3}
+        _ALIGN   = {"left": 0, "right": 1, "center": 2, "justify": 3}
+        try:
+            if not self.is_hwp_running:
+                return False
+            if apply_to_all:
+                self.hwp.HAction.Run("SelectAll")
+            pset = self.hwp.HParameterSet.HParaShape
+            self.hwp.HAction.GetDefault("ParagraphShape", pset.HSet)
+            if heading_type is not None:
+                code = _HEADING.get(heading_type.lower())
+                if code is None:
+                    logger.error(f"잘못된 heading_type: {heading_type!r}")
+                    return False
+                pset.HeadingType = code
+            if alignment is not None:
+                code = _ALIGN.get(alignment.lower())
+                if code is None:
+                    logger.error(f"잘못된 alignment: {alignment!r}")
+                    return False
+                pset.Alignment = code
+            if line_spacing is not None:
+                pset.LineSpacing = line_spacing
+            if left_margin is not None:
+                pset.LeftMargin = left_margin
+            if right_margin is not None:
+                pset.RightMargin = right_margin
+            if first_line is not None:
+                pset.FirstLineIndent = first_line
+            if space_before is not None:
+                pset.ParaSpaceBefore = space_before
+            if space_after is not None:
+                pset.ParaSpaceAfter = space_after
+            return bool(self.hwp.HAction.Execute("ParagraphShape", pset.HSet))
+        except Exception as e:
+            logger.error(f"문단 모양 설정 실패: {e}")
+            return False
+
+    def _has_leading_bullet(self, text: str) -> bool:
+        """텍스트가 말머리표나 번호 패턴으로 시작하는지 감지합니다."""
+        if not text:
+            return False
+        text_clean = text.lstrip()
+        if not text_clean:
+            return False
+        bullet_chars = "□■○●◎◇◆▷▶▲▼★＊※·•-*"
+        if text_clean[0] in bullet_chars:
+            return True
+        import re
+        numbering_pattern = re.compile(r'^([0-9a-zA-Z가-힣]+[\.\)]|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|⑪|⑫|⑬|⑭|⑮|Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ)\s*')
+        if numbering_pattern.match(text_clean):
+            return True
+        return False
+
+    def _strip_leading_bullet(self, text: str) -> str:
+        """텍스트의 선두 말머리표나 번호 패턴을 제거합니다."""
+        if not text:
+            return ""
+        text_clean = text.lstrip()
+        bullet_chars = "□■○●◎◇◆▷▶▲▼★＊※·•-*"
+        if text_clean and text_clean[0] in bullet_chars:
+            return text_clean[1:].lstrip()
+        import re
+        numbering_pattern = re.compile(r'^([0-9a-zA-Z가-힣]+[\.\)]|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|⑪|⑫|⑬|⑭|⑮|Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ)\s*')
+        match = numbering_pattern.match(text_clean)
+        if match:
+            return text_clean[match.end():].lstrip()
+        return text

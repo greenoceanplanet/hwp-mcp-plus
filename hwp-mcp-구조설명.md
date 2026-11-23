@@ -34,13 +34,11 @@ hwp-mcp는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이 제�
 
 ## 의존성
 
-1. **Python 패키지 의존성** (requirements.txt):
-   - flask==2.3.3
-   - pywin32==306 (HWP 자동화를 위한 핵심 라이브러리)
-   - python-dotenv==1.0.0
-   - pydantic==2.5.2
-   - jsonschema==4.19.1
-   - pytest==7.4.2
+1. **Python 패키지 의존성** (pyproject.toml, uv로 관리):
+   - pywin32 (HWP 자동화를 위한 핵심 라이브러리)
+   - comtypes
+   - mcp>=1.2,<2 (`mcp.server.fastmcp` v1 API 사용 — mcp 2.x에서는 FastMCP가 제거됨)
+   - 개발용: pytest, pytest-cov
 
 2. **외부 의존성**:
    - `mcp` Python 패키지: 이 프로젝트의 핵심 외부 의존성

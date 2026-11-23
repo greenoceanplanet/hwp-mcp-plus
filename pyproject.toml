@@ -1,0 +1,16 @@
+[project]
+name = "hwp-mcp"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "comtypes>=1.1.14",
+    "mcp>=1.2,<2",
+    "pillow>=13.0.0",
+    "pywin32>=228",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.3.1",
+    "pytest-cov>=4.1.0",
+]

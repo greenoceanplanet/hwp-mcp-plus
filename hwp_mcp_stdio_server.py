@@ -9,6 +9,15 @@ import logging
 import ssl
 from threading import Thread
 import time
+import builtins
+
+# Monkey-patch print to prevent stdout corruption in stdio MCP mode
+original_print = builtins.print
+def safe_print(*args, **kwargs):
+    if 'file' not in kwargs or kwargs['file'] is sys.stdout or kwargs['file'] is None:
+        kwargs['file'] = sys.stderr
+    original_print(*args, **kwargs)
+builtins.print = safe_print
 
 # Configure logging
 logging.basicConfig(
@@ -72,6 +81,28 @@ except ImportError as e:
         print(f"Error: Could not find HwpTableTools module", file=sys.stderr)
         sys.exit(1)
 
+# 찾은 글자 기준 삽입·서식 복사 헬퍼(COM 객체를 직접 받음)
+try:
+    from src.tools import hwp_edit_helpers
+except ImportError:
+    import hwp_edit_helpers
+
+# 변경 추적 수락/거절·일괄 수정·누름틀·문서 구조 헬퍼
+try:
+    from src.tools import hwp_review_helpers
+except ImportError:
+    import hwp_review_helpers
+
+# 서식 조건 찾기·스타일·메모 헬퍼, 공통 오류 응답, 변경 추적 처리
+try:
+    from src.tools import hwp_format_helpers
+    from src.tools import hwp_errors as errors
+    from src.tools.hwp_tracking import tracked_edit, track_scope, resolve_track, TRACK_NOTE
+except ImportError:
+    import hwp_format_helpers
+    import hwp_errors as errors
+    from hwp_tracking import tracked_edit, track_scope, resolve_track, TRACK_NOTE
+
 # Initialize FastMCP server
 mcp = FastMCP(
     "hwp-mcp",
@@ -102,18 +133,26 @@ def get_hwp_controller():
         logger.info("Creating HwpController instance...")
         try:
             hwp_controller = HwpController()
-            if not hwp_controller.connect(visible=True):
-                logger.error("Failed to connect to HWP program")
-                return None
+            connected = hwp_controller.connect(visible=True)
+            if not connected:
+                logger.warning("Failed to connect to HWP program on startup, but returning controller instance for manual reconnection/switching.")
 
             # 테이블 도구 인스턴스도 초기화
             hwp_table_tools = HwpTableTools(hwp_controller)
-
-            logger.info("Successfully connected to HWP program")
+            logger.info("HwpController instance created")
         except Exception as e:
             logger.error(f"Error creating HwpController: {str(e)}", exc_info=True)
             return None
     return hwp_controller
+
+def _get_com():
+    """현재 한글 COM 객체(연결 실패 시 None). 변경 추적 데코레이터용."""
+    hwp = get_hwp_controller()
+    return getattr(hwp, "hwp", None) if hwp else None
+
+# 기존 문서를 고치는 도구에 붙이는 변경 추적 데코레이터.
+# 도구 인자 track(True/False) > 환경변수 HWP_MCP_TRACK_EDITS(on/off) > 기본 on. 끝나면 작업 전 값으로 되돌림.
+track_edits = tracked_edit(_get_com)
 
 def get_hwp_table_tools():
     """Get or create HwpTableTools instance."""
@@ -130,33 +169,28 @@ def hwp_create() -> str:
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
         
         if hwp.create_new_document():
             logger.info("Successfully created new document")
             return "New document created successfully"
         else:
-            return "Error: Failed to create new document"
+            return errors.from_message("Error: Failed to create new document")
     except Exception as e:
         logger.error(f"Error creating document: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_list_tabs() -> str:
-    """
-    현재 HWP 창에서 열려있는 탭(문서) 목록을 반환합니다.
-
-    Returns:
-        str: 탭 목록 또는 에러 메시지
-    """
+    """현재 HWP 창에서 열려있는 탭(문서) 목록을 반환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, documents = hwp.get_open_documents()
         if not success:
-            return "Error: Failed to get document list"
+            return errors.from_message("Error: Failed to get document list")
 
         if not documents:
             return "열려있는 문서가 없습니다."
@@ -169,51 +203,37 @@ def hwp_list_tabs() -> str:
         return result
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_switch_tab(index: int) -> str:
-    """
-    현재 HWP 창에서 특정 탭으로 전환합니다.
-
-    Args:
-        index: 탭 인덱스 (hwp_list_tabs로 확인)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """현재 HWP 창에서 특정 인덱스의 탭으로 전환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, message = hwp.switch_document(index)
         if success:
             logger.info(message)
             return message
         else:
-            return f"Error: {message}"
+            return errors.from_message(message)
     except Exception as e:
         logger.error(f"Error switching document: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_list_windows() -> str:
-    """
-    실행 중인 모든 HWP 창을 찾습니다.
-    다른 창에 열려있는 HWP도 포함됩니다.
-
-    Returns:
-        str: 창 목록 또는 에러 메시지
-    """
+    """실행 중인 모든 HWP 창(인스턴스) 목록을 반환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, instances = hwp.get_all_hwp_instances()
         if not success:
-            return "Error: Failed to get HWP instances"
+            return errors.from_message("Error: Failed to get HWP instances")
 
         if not instances:
             return "실행 중인 HWP 인스턴스가 없습니다."
@@ -226,115 +246,109 @@ def hwp_list_windows() -> str:
         return result
     except Exception as e:
         logger.error(f"Error listing HWP instances: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_switch_window(hwnd: int) -> str:
-    """
-    다른 HWP 창으로 전환합니다.
-
-    Args:
-        hwnd: 윈도우 핸들 (hwp_list_windows로 확인)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """지정된 윈도우 핸들(hwnd)의 HWP 창으로 전환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, message = hwp.connect_to_hwp_instance(hwnd)
         if success:
             logger.info(message)
             return message
         else:
-            return f"Error: {message}"
+            return errors.from_message(message)
     except Exception as e:
         logger.error(f"Error connecting to HWP instance: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_close_window(hwnd: int) -> str:
-    """
-    HWP 창을 닫습니다 (저장 안 함).
-
-    Args:
-        hwnd: 윈도우 핸들 (hwp_list_all_instances로 확인)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """지정된 HWP 창을 닫습니다(저장 안 함)."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, message = hwp.close_hwp_window(hwnd)
         if success:
             logger.info(message)
             return message
         else:
-            return f"Error: {message}"
+            return errors.from_message(message)
     except Exception as e:
         logger.error(f"Error closing HWP window: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_open(path: str) -> str:
     """Open an existing HWP document."""
     try:
         if not path:
-            return "Error: File path is required"
+            return errors.from_message("Error: File path is required")
         
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
         
         if hwp.open_document(path):
             logger.info(f"Successfully opened document: {path}")
             return f"Document opened: {path}"
         else:
-            return "Error: Failed to open document"
+            return errors.from_message("Error: Failed to open document")
     except Exception as e:
         logger.error(f"Error opening document: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_save(path: str = None) -> str:
-    """Save the current HWP document."""
+    """
+    현재 문서를 저장합니다.
+    - path를 비우면 원래 파일에 덮어 저장. 한 번도 저장하지 않은 새 문서면 오류(path 필요).
+    - path를 주면 그 경로로 저장. 확장자로 형식 결정: .hwp / .hwpx / .pdf
+      (.pdf는 내보내기만 하고, 편집 중인 문서는 원래 파일 그대로)
+    """
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
-        
+            return errors.not_running()
+
         if path:
             if hwp.save_document(path):
-                logger.info(f"Successfully saved document to: {path}")
-                return f"Document saved to: {path}"
+                abs_path = os.path.abspath(path)
+                logger.info(f"Successfully saved document to: {abs_path}")
+                return f"Document saved to: {abs_path} ({hwp.save_format_for(abs_path)})"
             else:
-                return "Error: Failed to save document"
+                return errors.from_message("Error: Failed to save document")
         else:
-            temp_path = os.path.join(os.getcwd(), "temp_document.hwp")
-            if hwp.save_document(temp_path):
-                logger.info(f"Successfully saved document to temporary location: {temp_path}")
-                return f"Document saved to: {temp_path}"
-            else:
-                return "Error: Failed to save document"
+            ok, msg = hwp.save_current_document()
+            if ok:
+                logger.info(f"Successfully saved document: {msg}")
+                return f"Document saved to: {msg}"
+            return errors.from_message(msg)
     except Exception as e:
         logger.error(f"Error saving document: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
-def hwp_insert_text(text: str, preserve_linebreaks: bool = True) -> str:
-    """Insert text at the current cursor position."""
+@track_edits
+def hwp_insert_text(text: str, preserve_linebreaks: bool = True, track: bool = None) -> str:
+    """
+    Insert text at the current cursor position.
+
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
     try:
         if not text:
-            return "Error: Text is required"
+            return errors.from_message("Error: Text is required")
         
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         # 현재 커서가 표 안에 있는지 확인
         is_in_table = False
@@ -365,7 +379,7 @@ def hwp_insert_text(text: str, preserve_linebreaks: bool = True) -> str:
                 logger.info("Successfully inserted text with line breaks")
                 return "Text with line breaks inserted successfully"
             else:
-                return "Error: Failed to insert text with line breaks"
+                return errors.from_message("Error: Failed to insert text with line breaks")
         else:
             if hwp.insert_text(text):
                 # 표 안이 아닐 경우에만 커서를 오른쪽으로 이동
@@ -379,10 +393,10 @@ def hwp_insert_text(text: str, preserve_linebreaks: bool = True) -> str:
                 logger.info("Successfully inserted text")
                 return "Text inserted successfully"
             else:
-                return "Error: Failed to insert text"
+                return errors.from_message("Error: Failed to insert text")
     except Exception as e:
         logger.error(f"Error inserting text: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_set_font(
@@ -397,7 +411,7 @@ def hwp_set_font(
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
         
         # 현재 선택된 텍스트에 대해 글자 모양 설정
         if hwp.set_font_style(
@@ -411,11 +425,11 @@ def hwp_set_font(
             logger.info("Successfully set font")
             return "Font set successfully"
         else:
-            return "Error: Failed to set font"
+            return errors.from_message("Error: Failed to set font")
     
     except Exception as e:
         logger.error(f"Error setting font: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_insert_table(rows: int, cols: int) -> str:
@@ -424,12 +438,12 @@ def hwp_insert_table(rows: int, cols: int) -> str:
         # HwpTableTools 인스턴스 가져오기
         table_tools = get_hwp_table_tools()
         if not table_tools:
-            return "Error: Failed to get table tools instance"
+            return errors.from_message("Error: Failed to get table tools instance")
         
         return table_tools.insert_table(rows, cols)
     except Exception as e:
         logger.error(f"Error inserting table: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_insert_paragraph() -> str:
@@ -437,208 +451,252 @@ def hwp_insert_paragraph() -> str:
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
         
         if hwp.insert_paragraph():
             logger.info("Successfully inserted paragraph")
             return "Paragraph inserted successfully"
         else:
-            return "Error: Failed to insert paragraph"
+            return errors.from_message("Error: Failed to insert paragraph")
     except Exception as e:
         logger.error(f"Error inserting paragraph: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
-def hwp_get_text() -> str:
-    """Get the text content of the current document."""
+def hwp_get_text(start_text: str = "", max_chars: int = 0, page: int = 0) -> str:
+    """
+    현재 문서의 글자를 읽습니다. 인자를 비우면 문서 전체.
+    - start_text: 이 글자가 처음 나오는 곳부터 읽음(문서 처음부터 첫 번째). 비우면 문서 처음부터.
+    - max_chars: 최대 글자 수. 0이면 끝까지.
+    - page: 쪽 번호(1부터). 주면 그 쪽의 글자만 읽음(표·글상자 포함). start_text와 함께 쓰지 않음.
+    긴 문서에서 한 절만 볼 때 예: start_text="3. 용산공원", max_chars=3000
+    """
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
-        
+            return errors.not_running()
+
+        if page and page > 0:
+            total = int(hwp.hwp.PageCount)
+            if page > total:
+                return errors.from_message(f"Error: 쪽 번호가 범위를 벗어났습니다({page}/{total}쪽).")
+            text = hwp_review_helpers.get_page_text(hwp.hwp, page)
+            if max_chars and max_chars > 0:
+                text = text[:max_chars]
+            return text
+
+        if start_text or (max_chars and max_chars > 0):
+            ok, text = hwp.get_text_range(start_text, max_chars)
+            return text if ok else errors.from_message(text)
+
         text = hwp.get_text()
         if text is not None:
             logger.info("Successfully retrieved document text")
             return text
         else:
-            return "Error: Failed to get document text"
+            return errors.from_message("Error: Failed to get document text")
     except Exception as e:
         logger.error(f"Error getting text: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
-def hwp_close_document(save: bool = False, suppress_dialog: bool = True) -> str:
+def hwp_get_selection() -> str:
+    """현재 드래그(블록 지정)하여 선택된 영역의 텍스트를 가져옵니다."""
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+
+        text = hwp.get_selected_text()
+        if text:
+            logger.info("Successfully retrieved selected text")
+            return text
+        else:
+            return "선택된 텍스트가 없습니다. 한글 창에서 텍스트를 먼저 선택(블록 지정)하세요."
+    except Exception as e:
+        logger.error(f"Error getting selection: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_replace_selection(text: str, preserve_linebreaks: bool = True, track: bool = None) -> str:
     """
-    현재 문서를 닫습니다.
-
-    Args:
-        save: 저장 후 닫을지 여부 (기본값: False)
-        suppress_dialog: 저장 확인 팝업창 표시 안함 (기본값: True)
-
-    Returns:
-        str: 결과 메시지
+    한글 창에서 선택(블록 지정)한 영역을 text로 그 자리에서 바꿉니다.
+    선택이 없으면 아무것도 바꾸지 않고 오류를 돌려줍니다.
+    - preserve_linebreaks: True면 text 안의 줄바꿈(\\n)을 문단 나눔으로 넣음. False면 공백으로 바꿈.
+    흐름 예: hwp_get_selection으로 읽기 → 고쳐 쓰기 → hwp_replace_selection
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: HWP is not connected"
+            return errors.not_running()
+        selected = hwp.get_selected_text()
+        ok, msg = hwp_review_helpers.replace_selection(hwp.hwp, text, selected, preserve_linebreaks)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error replacing selection: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+def hwp_get_current_paragraph() -> str:
+    """커서가 위치한 현재 문단의 전체 텍스트를 가져옵니다(커서 위치 보존)."""
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+
+        text = hwp.get_current_paragraph_text()
+        if text:
+            logger.info("Successfully retrieved current paragraph")
+            return text
+        else:
+            return "현재 문단이 비어있거나 텍스트를 가져오지 못했습니다."
+    except Exception as e:
+        logger.error(f"Error getting current paragraph: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+def hwp_get_context() -> dict:
+    """
+    현재 커서를 기준으로 같은 문단 내 앞쪽/뒤쪽 문맥을 가져옵니다.
+
+    "이어쓰기"나 "이 위치 기준 교정"을 할 때 앞뒤 맥락 파악용으로 사용합니다.
+    커서 위치를 보존합니다.
+
+    Returns:
+        dict: {"before": 커서 앞쪽 텍스트, "after": 커서 뒤쪽 텍스트}
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+
+        context = hwp.get_cursor_context()
+        logger.info("Successfully retrieved cursor context")
+        return context
+    except Exception as e:
+        logger.error(f"Error getting context: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+def hwp_close_document(save: bool = False, suppress_dialog: bool = True) -> str:
+    """현재 활성화된 문서를 닫습니다."""
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
 
         if hwp.close_document(save, suppress_dialog):
             logger.info(f"Successfully closed document (save={save}, suppress_dialog={suppress_dialog})")
             return "Document closed successfully"
         else:
-            return "Error: Failed to close document"
+            return errors.from_message("Error: Failed to close document")
     except Exception as e:
         logger.error(f"Error closing document: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_close_all_documents(save: bool = False, suppress_dialog: bool = True) -> str:
-    """
-    모든 문서를 닫습니다.
-
-    Args:
-        save: 저장 후 닫을지 여부 (기본값: False)
-        suppress_dialog: 저장 확인 팝업창 표시 안함 (기본값: True)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """열려 있는 모든 HWP 문서를 닫습니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: HWP is not connected"
+            return errors.not_running()
 
         if hwp.close_all_documents(save, suppress_dialog):
             logger.info(f"Successfully closed all documents (save={save}, suppress_dialog={suppress_dialog})")
             return "All documents closed successfully"
         else:
-            return "Error: Failed to close all documents"
+            return errors.from_message("Error: Failed to close all documents")
     except Exception as e:
         logger.error(f"Error closing all documents: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_undo(count: int = 1) -> str:
-    """
-    실행 취소(Undo)를 수행합니다.
-
-    Args:
-        count: 취소할 횟수 (기본값: 1)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """직전 작업을 지정한 횟수만큼 실행 취소(Undo)합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, message = hwp.undo(count)
         if success:
             logger.info(message)
             return message
         else:
-            return f"Error: {message}"
+            return errors.from_message(message)
     except Exception as e:
         logger.error(f"Error in undo: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_redo(count: int = 1) -> str:
-    """
-    다시 실행(Redo)을 수행합니다.
-
-    Args:
-        count: 다시 실행할 횟수 (기본값: 1)
-
-    Returns:
-        str: 결과 메시지
-    """
+    """실행 취소한 작업을 지정한 횟수만큼 다시 실행(Redo)합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         success, message = hwp.redo(count)
         if success:
             logger.info(message)
             return message
         else:
-            return f"Error: {message}"
+            return errors.from_message(message)
     except Exception as e:
         logger.error(f"Error in redo: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_find_text(text: str) -> str:
-    """
-    문서에서 텍스트를 찾습니다.
-
-    Args:
-        text: 찾을 텍스트
-
-    Returns:
-        str: 결과 메시지
-    """
+    """문서 내에서 지정한 텍스트를 찾아 커서를 이동합니다."""
     try:
         if not text:
-            return "Error: Text is required"
+            return errors.from_message("Error: Text is required")
 
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         if hwp.find_text(text):
             logger.info(f"Found text: {text}")
             return f"Text found: {text}"
         else:
-            return f"Text not found: {text}"
+            return errors.err(errors.NOT_FOUND, f"글자를 찾지 못했습니다: {text}")
     except Exception as e:
         logger.error(f"Error finding text: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
-def hwp_replace_text(find: str, replace: str, replace_all: bool = True) -> str:
+@track_edits
+def hwp_replace_text(find: str, replace: str, replace_all: bool = True, track: bool = None) -> str:
     """
-    문서에서 텍스트를 찾아 바꿉니다.
+    문서 내에서 지정한 텍스트를 찾아 바꿉니다.
 
-    Args:
-        find: 찾을 텍스트
-        replace: 바꿀 텍스트
-        replace_all: 모두 바꾸기 여부 (기본값: True)
-
-    Returns:
-        str: 결과 메시지
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         if not find:
-            return "Error: Find text is required"
+            return errors.from_message("Error: Find text is required")
 
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
 
         if hwp.replace_text(find, replace, replace_all):
             logger.info(f"Replaced text: '{find}' -> '{replace}' (replace_all={replace_all})")
             return f"Text replaced: '{find}' -> '{replace}'"
         else:
-            return f"Text not found or replace failed: {find}"
+            return errors.err(errors.NOT_FOUND, f"바꿀 글자를 찾지 못했거나 바꾸기에 실패했습니다: {find}")
     except Exception as e:
         logger.error(f"Error replacing text: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_ping_pong(message: str = "핑") -> str:
-    """
-    핑퐁 테스트용 함수입니다. 핑을 보내면 퐁을 응답하고, 퐁을 보내면 핑을 응답합니다.
-
-    Args:
-        message: 테스트 메시지 (기본값: "핑")
-
-    Returns:
-        str: 응답 메시지
-    """
+    """MCP 작동 확인을 위한 핑퐁 테스트 함수입니다."""
     try:
         logger.info(f"핑퐁 테스트 함수 호출됨: 메시지 - {message}")
 
@@ -664,23 +722,12 @@ def hwp_ping_pong(message: str = "핑") -> str:
 
 @mcp.tool()
 def hwp_create_table_with_data(rows: int, cols: int, data = None, has_header: bool = False) -> str:
-    """
-    pywin32를 사용하여 현재 커서 위치에 표를 생성하고 데이터를 채웁니다.
-    
-    Args:
-        rows: 표의 행 수
-        cols: 표의 열 수
-        data: 표에 채울 데이터 (JSON 문자열 또는 파이썬 리스트)
-        has_header: 첫 번째 행을 헤더로 처리할지 여부
-        
-    Returns:
-        str: 결과 메시지
-    """
+    """현재 커서 위치에 표를 생성하고 데이터를 채웁니다."""
     try:
         # HwpTableTools 인스턴스 가져오기
         table_tools = get_hwp_table_tools()
         if not table_tools:
-            return "Error: Failed to get table tools instance"
+            return errors.from_message("Error: Failed to get table tools instance")
         
         # 현재 커서가 표 안에 있는지 확인
         hwp = get_hwp_controller()
@@ -697,7 +744,7 @@ def hwp_create_table_with_data(rows: int, cols: int, data = None, has_header: bo
         if not is_in_table:
             # 표 생성
             if not table_tools.insert_table(rows, cols):
-                return "Error: Failed to create table"
+                return errors.from_message("Error: Failed to create table")
         
         # 데이터가 있는 경우 표 채우기
         if data is not None:
@@ -758,39 +805,12 @@ def hwp_create_table_with_data(rows: int, cols: int, data = None, has_header: bo
         return f"표 생성 완료 ({rows}x{cols})"
     except Exception as e:
         logger.error(f"표 생성 중 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_create_complete_document(document_spec: dict) -> dict:
     """
-    전체 문서를 한 번의 호출로 작성합니다. 문서 구조, 내용 및 서식을 JSON으로 정의하여 전달합니다.
-    
-    Args:
-        document_spec (dict): 문서 사양을 담은 딕셔너리. 다음과 같은 구조를 가집니다:
-            {
-                "title": "문서 제목",             # 선택 사항
-                "filename": "저장할_파일명.hwp",  # 선택 사항, 저장할 경우
-                "elements": [                    # 필수: 문서를 구성하는 요소 배열
-                    {
-                        "type": "heading",       # 요소 유형 (heading, text, paragraph, table, etc.)
-                        "content": "제목",        # 요소 내용
-                        "properties": {          # 요소 속성 (선택 사항)
-                            "font_size": 16,
-                            "bold": true,
-                            ...
-                        }
-                    },
-                    ...
-                ],
-                "special_type": {               # 특수 문서 유형 (선택 사항)
-                    "type": "report",           # 보고서 등 특수 문서 유형
-                    "params": { ... }           # 특수 문서에 필요한 매개변수
-                },
-                "save": true                    # 저장 여부 (선택 사항)
-            }
-    
-    Returns:
-        dict: 문서 생성 결과
+    전체 문서를 한 번의 호출로 작성합니다. 상세 문서 구조 정의 스키마는 workspace의 instructions.md 문서를 참조하세요.
     """
     try:
         hwp = get_hwp_controller()
@@ -997,17 +1017,7 @@ def _create_letter(hwp, params, document_spec):
 @mcp.tool()
 def hwp_create_document_from_text(content: str, title: str = None, format_content: bool = True, save_filename: str = None, preserve_linebreaks: bool = True) -> dict:
     """
-    단일 문자열로 된 텍스트 내용으로 문서를 생성합니다.
-    
-    Args:
-        content (str): 문서 내용 (형식을 자동으로 감지하고 처리)
-        title (str, optional): 문서 제목. 없으면 첫 줄을 제목으로 사용.
-        format_content (bool): 내용 자동 포맷팅 여부 (줄바꿈, 문단 구분 등)
-        save_filename (str, optional): 저장할 파일 이름. 제공되지 않으면 저장하지 않음.
-        preserve_linebreaks (bool): 줄바꿈 유지 여부. True이면 원본 텍스트의 모든 줄바꿈 유지.
-        
-    Returns:
-        dict: 문서 생성 결과
+    단일 문자열로 된 텍스트 내용으로 문서를 생성합니다. 자동 형식 감지 및 포맷팅 규칙은 workspace의 instructions.md 문서를 참조하세요.
     """
     try:
         hwp = get_hwp_controller()
@@ -1144,17 +1154,7 @@ def hwp_create_document_from_text(content: str, title: str = None, format_conten
 @mcp.tool()
 def hwp_batch_operations(operations: list) -> dict:
     """
-    여러 HWP 작업을 한 번의 호출로 일괄 처리합니다.
-    
-    Args:
-        operations (list): 실행할 작업 목록. 각 작업은 다음 형식의 딕셔너리입니다:
-            {
-                "operation": "작업명", # 예: "create", "set_font", "insert_text" 등
-                "params": {파라미터 딕셔너리}  # 해당 작업에 필요한 파라미터
-            }
-    
-    Returns:
-        dict: 각 작업의 실행 결과
+    여러 HWP 작업을 한 번의 호출로 일괄(배치) 처리합니다. 지원하는 작업과 파라미터는 workspace의 instructions.md 문서를 참조하세요.
     """
     try:
         hwp = get_hwp_controller()
@@ -1392,23 +1392,17 @@ def hwp_batch_operations(operations: list) -> dict:
         return {"status": "error", "message": f"Error: {str(e)}"}
 
 @mcp.tool()
-def hwp_fill_table_with_data(data, start_row: int = 1, start_col: int = 1, has_header: bool = False) -> str:
+@track_edits
+def hwp_fill_table_with_data(data, start_row: int = 1, start_col: int = 1, has_header: bool = False, track: bool = None) -> str:
     """
     이미 존재하는 표에 데이터를 채웁니다.
-    
-    Args:
-        data: 표에 채울 데이터 (JSON 문자열 또는 2차원 리스트)
-        start_row: 시작 행 번호 (1부터 시작)
-        start_col: 시작 열 번호 (1부터 시작)
-        has_header: 첫 번째 행을 헤더로 처리할지 여부
-        
-    Returns:
-        str: 결과 메시지
+
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         table_tools = get_hwp_table_tools()
         if not table_tools:
-            return "Error: Failed to get table tools instance"
+            return errors.from_message("Error: Failed to get table tools instance")
         
         # 데이터 형식 로깅
         logger.info(f"Received data type: {type(data)}, data: {str(data)[:100]}...")
@@ -1456,21 +1450,21 @@ def hwp_fill_table_with_data(data, start_row: int = 1, start_col: int = 1, has_h
                                     # 단일 값인 경우
                                     processed_data = [[data]]
                             except Exception as parse_err:
-                                return f"Error: Failed to parse string data - {str(parse_err)}"
+                                return errors.from_message(f"Error: Failed to parse string data - {str(parse_err)}")
             except Exception as e:
                 logger.error(f"데이터 파싱 오류: {str(e)}", exc_info=True)
-                return f"Error: Failed to parse data - {str(e)}"
+                return errors.from_message(f"Error: Failed to parse data - {str(e)}")
         else:
-            return f"Error: Unsupported data type: {type(data)}"
+            return errors.from_message(f"Error: Unsupported data type: {type(data)}")
         
         # 데이터 구조 유효성 검사
         if not isinstance(processed_data, list):
             logger.error(f"Processed data is not a list: {type(processed_data)}")
-            return f"Error: Data must be a list, got {type(processed_data)}"
+            return errors.from_message(f"Error: Data must be a list, got {type(processed_data)}")
         
         if len(processed_data) == 0:
             logger.error("Empty data list")
-            return "Error: Empty data list"
+            return errors.from_message("Error: Empty data list")
         
         # 모든 행이 리스트인지 확인 및 변환
         for i, row in enumerate(processed_data):
@@ -1493,104 +1487,57 @@ def hwp_fill_table_with_data(data, start_row: int = 1, start_col: int = 1, has_h
         
     except Exception as e:
         logger.error(f"표 데이터 입력 중 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_navigate(direction: str) -> str:
-    """
-    표에서 지정된 방향으로 이동하고 현재 셀의 내용을 반환합니다.
-    표 구조를 실시간으로 탐색할 때 유용합니다.
-
-    Args:
-        direction: 이동 방향 ("left", "right", "up", "down")
-
-    Returns:
-        str: 이동 후 현재 셀의 내용
-    """
+    """표에서 지정된 방향으로 이동하고 현재 셀의 내용을 반환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: HWP 프로그램에 연결할 수 없습니다."
+            return errors.not_running()
 
         success, dir_used, cell_text = hwp.navigate_and_get_cell(direction)
 
         if success:
             return f"[{dir_used}] → 현재 셀: 「{cell_text}」"
         else:
-            return f"Error: {cell_text}"
+            return errors.from_message(cell_text)
 
     except Exception as e:
         logger.error(f"네비게이션 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 
 @mcp.tool()
 def hwp_find_and_show_cell(text: str) -> str:
-    """
-    텍스트를 찾고 해당 셀의 내용을 반환합니다.
-    표 구조 탐색의 시작점으로 유용합니다.
-
-    Args:
-        text: 찾을 텍스트
-
-    Returns:
-        str: 찾은 셀의 내용
-    """
+    """텍스트를 찾고 해당 셀의 내용을 반환합니다."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: HWP 프로그램에 연결할 수 없습니다."
+            return errors.not_running()
 
         success, cell_text = hwp.find_and_get_cell(text)
 
         if success:
             return f"'{text}' 찾음 → 현재 셀: 「{cell_text}」"
         else:
-            return f"Error: {cell_text}"
+            return errors.from_message(cell_text)
 
     except Exception as e:
         logger.error(f"찾기 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 
 @mcp.tool()
 def hwp_table_view(depth: int = 1) -> dict:
     """
-    현재 위치 기준으로 주변 셀들의 내용을 가져옵니다.
-    표 구조를 파악할 때 유용합니다.
-
-    **사용 예시:**
-    ```
-    # 상하좌우 1칸씩 보기
-    hwp_table_view(depth=1)
-    # 결과: {"center": "현재", "up_1": "위", "down_1": "아래", ...}
-
-    # 2칸씩 보기
-    hwp_table_view(depth=2)
-    # 결과: {"center": "현재", "up_1": "위1", "up_2": "위2", ...}
-    ```
-
-    **hwp_navigate, hwp_find_and_show_cell과 함께 사용:**
-    1. hwp_find_and_show_cell("레이블")로 시작점 찾기
-    2. hwp_table_view()로 주변 구조 파악
-    3. hwp_navigate("방향")으로 이동
-    4. hwp_fill_cells()로 값 입력
-
-    Args:
-        depth: 탐색 깊이 (기본값: 1, 최대 권장: 3)
-
-    Returns:
-        dict: 셀 내용 딕셔너리
-            - "center": 현재 셀
-            - "up_1", "up_2", ...: 위쪽 셀들
-            - "down_1", "down_2", ...: 아래쪽 셀들
-            - "left_1", "left_2", ...: 왼쪽 셀들
-            - "right_1", "right_2", ...: 오른쪽 셀들
+    현재 위치 기준으로 주변 셀들의 내용을 가져옵니다. 반환 딕셔너리 구조는 workspace의 instructions.md 문서를 참조하세요.
     """
     try:
         hwp = get_hwp_controller()
         if not hwp:
-            return {"error": "HWP 프로그램에 연결할 수 없습니다."}
+            return {"error": errors.not_running()}
 
         # depth 제한
         depth = min(max(depth, 1), 5)
@@ -1605,75 +1552,27 @@ def hwp_table_view(depth: int = 1) -> dict:
 
     except Exception as e:
         logger.error(f"테이블 뷰 오류: {str(e)}", exc_info=True)
-        return {"error": str(e)}
+        return {"error": errors.com_error(e)}
 
 
 @mcp.tool()
+@track_edits
 def hwp_fill_cells(
     path_value_map: dict,
-    mode: str = "replace"
+    mode: str = "replace",
+    track: bool = None,
 ) -> str:
     """
-    표에서 경로를 따라 셀에 값을 입력합니다. 단일/배치 자동 인식.
-
-    **⚠️ 중요: 반드시 표 구조를 먼저 파악하세요!**
-    1. hwp_find_and_show_cell("레이블")로 시작점 찾기
-    2. hwp_table_view(depth=2)로 주변 셀 구조 확인
-    3. 구조를 이해한 후 hwp_fill_cells 호출
-
-    **방향 키워드:** <left>, <right>, <up>, <down>
-    - 텍스트 찾기 후 방향 이동을 조합하여 정확한 셀 탐색
-
-    **사용 예시:**
-    ```
-    # 레이블 오른쪽 셀에 값 입력
-    hwp_fill_cells({"이름 > <right>": "홍길동"})
-
-    # 헤더 아래 셀에 값 입력
-    hwp_fill_cells({"항목1 > <down>": "값1"})
-
-    # 여러 셀 배치 입력
-    hwp_fill_cells({
-        "이름 > <right>": "홍길동",
-        "연락처 > <right>": "010-1234-5678",
-        "주소 > <right>": "서울시"
-    })
-
-    # 복잡한 경로 (여러 번 이동)
-    hwp_fill_cells({
-        "합계 > <down> > <down>": "100",
-        "비고 > <right> > <down>": "완료"
-    })
-
-    # 기존 내용 앞에 추가 (예: "원" → "1000원")
-    hwp_fill_cells({"금액 > <right>": "1000"}, mode="prepend")
-    ```
-
-    **경로 형식:**
-    - "텍스트 > <방향> > <방향> > ..."
-    - 구분자: " > " 또는 "/"
-    - 첫 번째 항목: 찾을 텍스트 (표 안의 셀)
-    - 이후 항목: 방향 키워드로 이동
-
-    Args:
-        path_value_map: 경로와 값의 딕셔너리
-            - 키: 경로 문자열 (텍스트와 방향 키워드 조합)
-            - 값: 입력할 값
-        mode: 입력 모드
-            - "replace": 기존 내용 삭제 후 입력 (기본값)
-            - "prepend": 기존 내용 앞에 추가 (예: "명" → "3명")
-            - "append": 기존 내용 뒤에 추가
-
-    Returns:
-        str: 처리 결과 메시지
+    표에서 지정된 경로(예: "이름 > <right>")를 따라 여러 셀에 값을 입력합니다. 경로 상세 규칙 및 모드는 workspace의 instructions.md 문서를 참조하세요.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         if not path_value_map:
-            return "Error: path_value_map이 필요합니다."
+            return errors.from_message("Error: path_value_map이 필요합니다.")
 
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: HWP 프로그램에 연결할 수 없습니다."
+            return errors.not_running()
 
         # 배치 처리 (direction은 경로에서 결정되므로 "right"를 기본값으로)
         results = hwp.fill_cells_by_path_batch(path_value_map, "right", mode)
@@ -1699,28 +1598,22 @@ def hwp_fill_cells(
 
     except Exception as e:
         logger.error(f"셀 채우기 중 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+        return errors.com_error(e)
 
 
 @mcp.tool()
-def hwp_fill_column_numbers(start: int = 1, end: int = 10, column: int = 1, from_first_cell: bool = True) -> str:
+@track_edits
+def hwp_fill_column_numbers(start: int = 1, end: int = 10, column: int = 1, from_first_cell: bool = True, track: bool = None) -> str:
     """
     표의 특정 열에 시작 숫자부터 끝 숫자까지 세로로 채웁니다.
-    
-    Args:
-        start: 시작 숫자 (기본값: 1)
-        end: 끝 숫자 (기본값: 10)
-        column: 숫자를 채울 열 번호 (1부터 시작, 기본값: 1)
-        from_first_cell: 정확히 표의 첫 번째 셀부터 시작할지 여부 (기본값: True)
-    
-    Returns:
-        str: 결과 메시지
+
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         # HWP 컨트롤러 가져오기
         hwp = get_hwp_controller()
         if not hwp:
-            return "Error: Failed to connect to HWP program"
+            return errors.not_running()
         
         # 표 선택 (현재 커서 위치에 표가 있어야 함)
         logger.info(f"테이블 열에 숫자 채우기: 열 {column}, {start}부터 {end}까지")
@@ -1754,7 +1647,613 @@ def hwp_fill_column_numbers(start: int = 1, end: int = 10, column: int = 1, from
         
     except Exception as e:
         logger.error(f"테이블 숫자 채우기 오류: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}"
+@mcp.tool()
+def hwp_set_track_changes(active: bool) -> str:
+    """변경 내용 추적(Track Changes) 모드를 켜거나 끕니다."""
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if hwp.set_track_changes(active):
+            status = "활성화" if active else "비활성화"
+            return f"변경 내용 추적 기능이 {status}되었습니다."
+        else:
+            return errors.from_message("Error: 변경 내용 추적 설정 실패")
+    except Exception as e:
+        logger.error(f"Error setting track changes: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+def hwp_track_changes_resolve(action: str = "apply_all") -> str:
+    """
+    변경 추적으로 표시된 고친 내용을 반영(수락)하거나 되돌립니다(거절).
+    - action:
+        "apply_all"   모든 변경 내용 반영
+        "cancel_all"  모든 변경 내용 되돌림(원문 복원)
+        "apply_next"  커서 다음의 변경 내용 하나 반영
+        "cancel_next" 커서 다음의 변경 내용 하나 되돌림
+        "apply" / "cancel"  커서 위치의 변경 내용 하나
+    흐름 예: hwp_set_track_changes(True) → hwp_patch로 고침 → 사용자 검토 → 이 도구로 반영/되돌림
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_review_helpers.resolve_track_changes(hwp.hwp, action)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error resolving track changes: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_patch(edits: list, track: bool = None) -> dict:
+    """
+    원문 일부(old)를 찾아 new로 바꾸는 작업 여러 건을 한 번에 실행하고, 건별 결과를 돌려줍니다.
+    - edits: [{"old": "바꿀 원문", "new": "새 글자"}, ...]
+        * old: 문서에 있는 글자 그대로(한 문단 안, 줄바꿈 불가). 한 곳에만 있도록 앞뒤 글자를 넉넉히 포함.
+        * new: 바꿀 글자. 비우면 지움. 줄바꿈(\\n)은 문단 나눔.
+        * occurrence(선택): old가 여러 곳이면 몇 번째(1부터)를 바꿀지.
+        * all(선택): True면 모든 곳을 바꿈.
+      old가 여러 곳에서 일치하는데 occurrence/all이 없으면 바꾸지 않고 status="ambiguous".
+    Returns: {"summary": "...", "results": [{"index", "old", "status"(ok/not_found/ambiguous/invalid/error), "count", "replaced", "message"}]}
+    실패한 건만 old를 고쳐 다시 보내면 됩니다.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        if isinstance(edits, str):
+            edits = json.loads(edits)
+        # 변경 추적은 track_edits 데코레이터가 처리
+        results = hwp_review_helpers.patch_document(hwp.hwp, edits, text_reader=hwp.get_text, track=None)
+        return {"summary": hwp_review_helpers.summarize_patch(results), "results": results}
+    except Exception as e:
+        logger.error(f"Error patching document: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+def hwp_fields(action: str = "list", name: str = "", value: str = None, values: dict = None, track: bool = None) -> dict:
+    """
+    누름틀·셀 필드(이름 붙은 입력 칸)를 읽고 씁니다. 서식 양식 채우기에 가장 정확한 방법입니다.
+    - action:
+        "list" 필드 이름 목록. 같은 이름이 여러 개면 "이름{{0}}", "이름{{1}}"처럼 번호가 붙음.
+        "get"  name 필드 값 읽기. name을 비우면 모든 필드 값.
+        "put"  값 쓰기. name+value 한 개, 또는 values={"이름": "값", ...} 여러 개.
+               "이름"만 쓰면 같은 이름 필드 전부, "이름{{1}}"이면 그 하나만.
+    문서에 필드가 없으면 list가 빈 목록입니다(이때는 hwp_fill_cells 등 다른 도구 사용).
+    track: put할 때 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        h = hwp.hwp
+        if action == "list":
+            names = hwp_review_helpers.list_fields(h, 1)
+            return {"count": len(names), "fields": names}
+        if action == "get":
+            return {"values": hwp_review_helpers.get_fields(h, [name] if name else None)}
+        if action == "put":
+            data = dict(values or {})
+            if name:
+                data[name] = "" if value is None else value
+            effective = resolve_track(track)
+            with track_scope(h, effective):
+                ok, msg, missing = hwp_review_helpers.put_fields(h, data)
+            out = {"ok": ok, "message": msg, "missing": missing}
+            if ok and effective:
+                out["track_changes"] = TRACK_NOTE
+            if not ok:
+                out["error"] = errors.err(errors.NOT_FOUND if missing else errors.INVALID_ARG, msg,
+                                          "hwp_fields(action='list')로 실제 필드 이름을 확인하세요." if missing else None)
+            return out
+        return {"error": errors.err(errors.INVALID_ARG, f"action은 list/get/put 중 하나여야 합니다: {action}")}
+    except Exception as e:
+        logger.error(f"Error handling fields: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+def hwp_scan_document(include_headings: bool = True) -> dict:
+    """
+    현재 문서의 구조를 요약합니다. 긴 문서를 고치기 전에 먼저 훑어볼 때 씁니다.
+    Returns:
+      pages: 쪽 수
+      table_count / tables: [{"index", "page"}]  (최대 200개까지 상세. 표 내용은 hwp_table_view)
+      picture_count / pictures: [{"index", "page"}]
+      other_controls: 그 밖의 개체 종류별 개수(CtrlID 기준)
+      headings: 개요 문단 [{"level", "number", "text"}]  (include_headings=False면 생략, 표 안 문단 제외)
+    커서 위치는 원래대로 돌려놓습니다. 특정 쪽 글자는 hwp_get_text(page=n).
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        return hwp_review_helpers.scan_document(hwp.hwp, include_headings)
+    except Exception as e:
+        logger.error(f"Error scanning document: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+def hwp_search_format(
+    text: str = "",
+    bold: bool = None,
+    italic: bool = None,
+    underline: bool = None,
+    font_size: float = None,
+    text_color: str = None,
+    font_name: str = "",
+    max_results: int = 50,
+) -> dict:
+    """
+    서식 조건으로 글자를 찾습니다. 예: 굵은 글씨, 빨간 글씨, 14pt 글자, 특정 글꼴.
+    - text: 비우면 조건에 맞는 모든 글자. 쓰면 그 글자 중 조건에 맞는 것만.
+    - bold/italic/underline: True/False. None이면 조건에 넣지 않음.
+    - font_size: 글자 크기(pt). 예: 14
+    - text_color: "#RRGGBB" 또는 red/blue/green/black/gray 등.
+    - font_name: 글꼴 이름 일부(예: "돋움", "HY견고딕"). 이 조건이 있으면 문서를 HWPML로 읽어 판정하므로 쪽 번호(page)는 null.
+    여러 조건은 모두 만족(AND). 문서는 바꾸지 않고 커서도 원래 자리로 돌려놓습니다.
+    Returns: {"method": "find"|"hwpml", "count", "matches": [{"index", "text", "page", ...}]}
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        try:
+            cond = hwp_format_helpers.build_charshape_conditions(bold, italic, underline, font_size, text_color)
+        except ValueError as ve:
+            return {"error": errors.err(errors.INVALID_ARG, str(ve))}
+        if not cond and not font_name:
+            return {"error": errors.err(errors.INVALID_ARG, "서식 조건(bold/italic/underline/font_size/text_color/font_name)을 하나 이상 지정하세요.",
+                                        "글자만 찾으려면 hwp_find_text를 쓰세요.")}
+        max_results = max(1, min(int(max_results or 50), 500))
+        if font_name:
+            xml = hwp_format_helpers.read_hwpml(hwp.hwp)
+            matches = hwp_format_helpers.find_by_format_hwpml(xml, text, cond, font_name, max_results)
+            method = "hwpml"
+        else:
+            matches = hwp_format_helpers.find_by_charshape(hwp.hwp, text, cond, max_results)
+            method = "find"
+        out = {"method": method, "count": len(matches), "matches": matches}
+        if not matches:
+            out["message"] = "조건에 맞는 글자가 없습니다."
+        if len(matches) >= max_results:
+            out["truncated"] = True
+        return out
+    except Exception as e:
+        logger.error(f"Error searching by format: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+def hwp_list_styles() -> dict:
+    """
+    문서의 스타일 목록과 커서 위치 문단의 현재 스타일을 돌려줍니다.
+    Returns: {"current": {"index", "name"}, "styles": [{"index", "name", "eng_name", "type"(Para/Char)}]}
+    문서는 바꾸지 않습니다. 스타일 적용은 hwp_set_style.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        styles = hwp_format_helpers.list_styles(hwp_format_helpers.read_hwpml(hwp.hwp))
+        cur = None
+        try:
+            idx = hwp_format_helpers.current_style_index(hwp.hwp)
+            st = hwp_format_helpers.resolve_style(styles, idx)
+            cur = {"index": idx, "name": st["name"] if st else ""}
+        except Exception as e:
+            logger.debug(f"현재 스타일 읽기 실패(무시): {e}")
+        return {"current": cur, "count": len(styles), "styles": styles}
+    except Exception as e:
+        logger.error(f"Error listing styles: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+@mcp.tool()
+@track_edits
+def hwp_set_style(style: str, anchor: str = "", occurrence: int = 1, track: bool = None) -> str:
+    """
+    문단에 스타일을 적용합니다(예: "개요 1", "본문", "Outline 2", 또는 번호 2).
+    - style: 스타일 이름(한글/영문) 또는 번호. 목록은 hwp_list_styles.
+    - anchor: 이 글자가 있는 문단에 적용. 비우면 커서 위치 문단(블록 선택 시 선택한 문단들).
+    - occurrence: anchor가 여러 곳이면 몇 번째(1부터).
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        h = hwp.hwp
+        styles = hwp_format_helpers.list_styles(hwp_format_helpers.read_hwpml(h))
+        st = hwp_format_helpers.resolve_style(styles, style)
+        if not st:
+            return errors.err(errors.NOT_FOUND, f"없는 스타일입니다: {style}",
+                              "hwp_list_styles로 실제 스타일 이름을 확인하세요.")
+        if anchor:
+            if not hwp_review_helpers._find_nth(h, anchor, max(1, int(occurrence or 1))):
+                return errors.err(errors.NOT_FOUND, f"기준 글자를 찾지 못했습니다: {anchor}")
+            h.HAction.Run("Cancel")
+        if not hwp_format_helpers.apply_style(h, st["index"]):
+            return errors.err(errors.COM_ERROR, f"스타일 적용 실패: {st['name']}")
+        where = f"'{anchor}' 문단" if anchor else "현재 문단"
+        return f"{where}에 스타일 '{st['name']}'(번호 {st['index']})을 적용했습니다."
+    except Exception as e:
+        logger.error(f"Error setting style: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+def hwp_memo(action: str = "list", text: str = "", anchor: str = "", occurrence: int = 1) -> dict:
+    """
+    메모(검토 의견)를 읽거나 넣습니다. 본문은 고치지 않고 의견만 남길 때 씁니다.
+    - action="list": 문서의 모든 메모. [{"index", "author", "content", "target"(메모가 붙은 본문 글자), "paragraph_text"}]
+    - action="insert": anchor 글자(occurrence번째)에 text 메모를 붙임. anchor를 비우면 현재 선택/커서 위치.
+    list는 문서를 바꾸거나 저장하지 않습니다(HWPML로 읽음).
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        h = hwp.hwp
+        if action == "list":
+            memos = hwp_format_helpers.list_memos(hwp_format_helpers.read_hwpml(h))
+            return {"count": len(memos), "memos": memos}
+        if action == "insert":
+            if not text:
+                return {"error": errors.err(errors.INVALID_ARG, "메모 내용(text)이 필요합니다.")}
+            if anchor:
+                if not hwp_review_helpers._find_nth(h, anchor, max(1, int(occurrence or 1))):
+                    return {"error": errors.err(errors.NOT_FOUND, f"기준 글자를 찾지 못했습니다: {anchor}")}
+            if not hwp_format_helpers.insert_memo(h, text):
+                return {"error": errors.err(errors.COM_ERROR, "메모 넣기 실패")}
+            return {"ok": True, "message": f"메모를 넣었습니다{f' (대상: {anchor})' if anchor else ''}."}
+        return {"error": errors.err(errors.INVALID_ARG, f"action은 list/insert 중 하나여야 합니다: {action}")}
+    except Exception as e:
+        logger.error(f"Error handling memo: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+_TABLE_INSERT_ACTIONS = {
+    "below": "TableInsertLowerRow",
+    "above": "TableInsertUpperRow",
+    "right": "TableInsertRightColumn",
+    "left": "TableInsertLeftColumn",
+}
+
+def _move_to_anchor(hwp, anchor: str) -> bool:
+    """anchor 글자를 찾아 그 셀로 커서를 옮깁니다. anchor가 비면 현재 커서 위치를 씁니다."""
+    if not anchor:
+        return True
+    if not hwp.find_text(anchor):
+        return False
+    hwp.hwp.Run("Cancel")  # 찾은 글자 선택 해제(커서는 그 셀 안에 남음)
+    return True
+
+@mcp.tool()
+@track_edits
+def hwp_table_insert(anchor: str = "", position: str = "below", count: int = 1, data: list = None, track: bool = None) -> str:
+    """
+    표에 행 또는 열을 넣습니다.
+    - anchor: 기준 셀 안의 글자(문서 처음부터 첫 번째로 찾은 곳). 비우면 현재 커서가 있는 셀 기준.
+    - position: "below"/"above"(행), "right"/"left"(열).
+    - count: 넣을 행·열 수.
+    - data: (행 추가 때만) 새 행에 채울 값. [[1행 셀값...], [2행 셀값...]] 처럼 위에서 아래 순서.
+      각 행은 첫 열부터 채움. 셀 수보다 짧으면 나머지는 빈칸.
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        if position not in _TABLE_INSERT_ACTIONS:
+            return errors.from_message(f"Error: position은 {list(_TABLE_INSERT_ACTIONS)} 중 하나여야 합니다.")
+        if count < 1:
+            return errors.from_message("Error: count는 1 이상이어야 합니다.")
+        if data and position not in ("below", "above"):
+            return errors.err(errors.INVALID_ARG, "data는 행 추가(below/above)에서만 쓸 수 있습니다.")
+        if data and len(data) > count:
+            return errors.err(errors.INVALID_ARG, f"data 행 수({len(data)})가 count({count})보다 많습니다.")
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if not _move_to_anchor(hwp, anchor):
+            return errors.from_message(f"Error: 기준 글자를 찾지 못했습니다: {anchor}")
+        h = hwp.hwp
+        action = _TABLE_INSERT_ACTIONS[position]
+        for _ in range(count):
+            if not h.HAction.Run(action):
+                return errors.from_message("Error: 행·열 넣기 실패(커서가 표 안에 있는지 확인하세요)")
+        if data:
+            # 행 추가 후 커서는 기준 셀에 남아 있음 → 새 행 첫 줄로 이동
+            if position == "below":
+                h.Run("TableLowerCell")
+            else:
+                for _ in range(count):
+                    h.Run("TableUpperCell")
+            for i, row in enumerate(data):
+                if i:
+                    h.Run("TableLowerCell")
+                h.Run("TableColBegin")
+                for j, val in enumerate(row):
+                    if j:
+                        h.Run("TableRightCell")
+                    if val not in (None, ""):
+                        hwp.insert_text(str(val), preserve_linebreaks=False)
+                h.Run("TableColBegin")
+        kind = "행" if position in ("below", "above") else "열"
+        return f"{kind} {count}개를 {position} 쪽에 넣었습니다." + (f" {len(data)}행에 값을 채웠습니다." if data else "")
+    except Exception as e:
+        logger.error(f"Error inserting table rows/cols: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_table_delete(anchor: str = "", target: str = "row", count: int = 1, track: bool = None) -> str:
+    """
+    표에서 행 또는 열을 지웁니다.
+    - anchor: 기준 셀 안의 글자(문서 처음부터 첫 번째로 찾은 곳). 비우면 현재 커서가 있는 셀 기준.
+    - target: "row"(기준 셀의 행부터 아래로 count개) 또는 "column"(기준 셀의 열부터 오른쪽으로 count개).
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        actions = {"row": "TableDeleteRow", "column": "TableDeleteColumn"}
+        if target not in actions:
+            return errors.from_message("Error: target은 'row' 또는 'column'이어야 합니다.")
+        if count < 1:
+            return errors.from_message("Error: count는 1 이상이어야 합니다.")
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if not _move_to_anchor(hwp, anchor):
+            return errors.from_message(f"Error: 기준 글자를 찾지 못했습니다: {anchor}")
+        for _ in range(count):
+            if not hwp.hwp.HAction.Run(actions[target]):
+                return errors.from_message("Error: 행·열 지우기 실패(커서가 표 안에 있는지 확인하세요)")
+        kind = "행" if target == "row" else "열"
+        return f"{kind} {count}개를 지웠습니다."
+    except Exception as e:
+        logger.error(f"Error deleting table rows/cols: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_insert_at(anchor: str = "", text: str = "", position: str = "para_after", copy_format_from: str = "", track: bool = None) -> str:
+    """
+    찾은 글자(anchor)를 기준으로 글자를 넣습니다.
+    - anchor: 기준 글자(문서 처음부터 첫 번째로 찾은 곳). 비우면 현재 커서 위치 기준.
+    - text: 넣을 글자. 줄바꿈(\\n)은 문단 나눔(line_after에서는 같은 문단 안 줄 바꿈).
+    - position:
+        "para_before"  anchor 문단 앞에 새 문단
+        "para_after"   anchor 문단 뒤에 새 문단
+        "line_after"   anchor 문단 끝에서 줄 바꿈(Shift+Enter, BreakLine) 후 이어 씀(같은 문단)
+        "after_match"  찾은 글자 바로 뒤에 끼워 넣음
+        "before_match" 찾은 글자 바로 앞에 끼워 넣음
+    - copy_format_from: 넣은 뒤, 이 글자가 있는 문단의 글자·문단 모양(글머리표 포함)을
+      새로 넣은 글자가 있는 문단 전체에 적용. 비우면 서식은 그대로(새 문단은 anchor 문단의
+      문단 모양·글머리표를 물려받음).
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.insert_at(hwp.hwp, anchor, text, position, copy_format_from)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error inserting at anchor: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_copy_format(from_anchor: str, to_anchor: str, char: bool = True, para: bool = True, track: bool = None) -> str:
+    """
+    한 문단의 서식을 다른 문단 전체에 복사합니다.
+    - from_anchor: 서식 원본 문단 안의 글자. 글자 모양은 이 글자 기준, 문단 모양은 그 문단 기준.
+      비우면 현재 커서 위치 기준.
+    - to_anchor: 서식을 받을 문단 안의 글자(문단 전체에 적용). 비우면 현재 커서 문단.
+      (두 anchor 모두 문서 처음부터 첫 번째로 찾은 곳)
+    - char: 글자 모양 복사(크기, 글꼴, 굵게·기울임, 색, 장평·자간 등).
+    - para: 문단 모양 복사(정렬, 왼쪽·오른쪽 여백, 들여쓰기, 줄 간격, 문단 앞뒤 간격,
+      문단 종류 HeadingType과 글머리 문자).
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        if not char and not para:
+            return errors.from_message("Error: char와 para 중 하나는 True여야 합니다.")
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.copy_format(hwp.hwp, from_anchor, to_anchor, char=char, para=para)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error copying format: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_insert_image(image_path: str, width_mm: float = 0, height_mm: float = 0,
+                     anchor: str = "", position: str = "para_after", track: bool = None) -> str:
+    """
+    그림 파일을 문서에 포함(링크 아님)해서 넣습니다. 글자처럼 취급되어 글과 함께 움직입니다.
+    - image_path: 그림 파일 경로(png, jpg, bmp, gif 등).
+    - width_mm / height_mm: 크기(mm). 둘 다 0이면 원래 크기, 한쪽만 주면 원래 가로세로 비율 유지.
+    - anchor: 기준 글자(문서 처음부터 첫 번째로 찾은 곳). 비우면 현재 커서 위치 기준.
+    - position:
+        "para_before"  anchor 문단 앞에 그림만 있는 새 문단
+        "para_after"   anchor 문단 뒤에 그림만 있는 새 문단
+        "at_cursor"    커서 위치(anchor가 있으면 찾은 글자 바로 뒤)에 끼워 넣음
+    새 문단은 anchor 문단의 문단 모양(정렬 등)을 물려받음.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.insert_picture(hwp.hwp, image_path, width_mm, height_mm, anchor, position)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error inserting image: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_replace_image(image_path: str, near_text: str, which: str = "after", track: bool = None) -> str:
+    """
+    기존 그림의 그림 파일만 바꿉니다(한글의 '그림 바꾸기'). 그림 개체는 그대로라
+    캡션(자동 번호 포함)·위치·너비·높이·글자처럼 취급 여부가 그대로 남습니다.
+    - image_path: 새 그림 파일 경로. 문서에 포함됨(링크 아님).
+    - near_text: 바꿀 그림을 찾을 글자(예: 캡션 "<그림 1> 거주 연수별 누적 순주거비"). 문서 처음부터 첫 번째로 찾은 곳.
+      그림의 캡션 안 글자면 그 그림을 바꿈(which 무시).
+    - which: near_text가 캡션이 아닌 보통 문단에 있을 때 "after"면 그 문단 뒤의 첫 그림,
+      "before"면 그 문단 앞의 가장 가까운 그림(같은 리스트, 즉 본문이면 본문 안의 그림만 찾음).
+    이전 크기와 새 크기를 돌려줍니다.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.replace_picture(hwp.hwp, image_path, near_text, which)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error replacing image: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_delete_image(near_text: str, which: str = "after", track: bool = None) -> str:
+    """
+    그림 개체를 지웁니다. 캡션이 있으면 캡션도 함께 지워집니다.
+    - near_text: 지울 그림을 찾을 글자(문서 처음부터 첫 번째로 찾은 곳).
+      그림의 캡션 안 글자면 그 그림을 지움(which 무시).
+    - which: near_text가 캡션이 아닌 보통 문단에 있을 때 "after"면 그 문단 뒤의 첫 그림,
+      "before"면 그 문단 앞의 가장 가까운 그림(같은 리스트 안의 그림만 찾음).
+    지운 그림의 크기와 캡션 글자(캡션으로 찾은 경우)를 돌려줍니다.
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        reader = lambda: hwp._get_text_file_safe("TEXT", "saveblock")
+        ok, msg = hwp_edit_helpers.delete_picture(hwp.hwp, near_text, which, text_reader=reader)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error deleting image: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_fill_table_grid(anchor: str, rows: list, skip_empty: bool = True, track: bool = None) -> str:
+    """
+    표 전체를 왼쪽 위 셀부터 행 순서대로 한꺼번에 채웁니다. 셀의 글자 모양은 그대로 둡니다.
+    - anchor: 채울 표의 아무 셀 안의 글자(문서 처음부터 첫 번째로 찾은 곳).
+    - rows: [[1행 값...], [2행 값...]]. 펼쳐서 셀 순서(Tab으로 다음 셀 가는 순서)대로 대응.
+      병합된 셀은 한 칸으로 셈. 그래서 각 행에 그 행의 셀을 빠짐없이 적을 것.
+      값이 null이면 그 셀은 건드리지 않음. 숫자도 됨. 줄바꿈(\\n)은 셀 안 문단 나눔.
+    - skip_empty: True면 ""도 건드리지 않음. False면 ""은 셀 내용을 지움.
+    표 끝을 넘는 값은 버림(행이 늘어나지 않음). 채운 칸 수를 돌려줍니다.
+    편집 전에 hwp_set_track_changes(active=True)를 먼저 켤 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        if isinstance(rows, str):
+            rows = json.loads(rows)
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.fill_table_grid(hwp.hwp, anchor, rows, skip_empty)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error filling table grid: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
+def hwp_set_paragraph_shape(
+    heading_type: str = None,
+    alignment: str = None,
+    line_spacing: int = None,
+    left_margin: int = None,
+    right_margin: int = None,
+    first_line: int = None,
+    space_before: int = None,
+    space_after: int = None,
+    apply_to_all: bool = False,
+    track: bool = None,
+) -> str:
+    """
+    현재 커서 위치 또는 선택된 문단의 모양을 설정합니다.
+    지정한 파라미터만 변경되고 나머지는 기존 값이 유지됩니다.
+
+    Args:
+        heading_type: 문단 유형.
+            "none"=없음, "outline"=개요, "number"=번호매기기, "bullet"=글머리표
+        alignment: 정렬.
+            "left"=왼쪽, "center"=가운데, "right"=오른쪽, "justify"=양쪽
+        line_spacing: 줄간격(%). 예: 160 → 160%
+        left_margin: 왼쪽 여백(hwpunit). 1pt=100
+        right_margin: 오른쪽 여백(hwpunit).
+        first_line: 첫줄 들여쓰기(hwpunit). 양수=들여쓰기, 음수=내어쓰기
+        space_before: 문단 앞 간격(hwpunit).
+        space_after: 문단 뒤 간격(hwpunit).
+        apply_to_all: True이면 전체 문서에 적용 (SelectAll 후 실행).
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if hwp.set_paragraph_shape(
+            heading_type=heading_type,
+            alignment=alignment,
+            line_spacing=line_spacing,
+            left_margin=left_margin,
+            right_margin=right_margin,
+            first_line=first_line,
+            space_before=space_before,
+            space_after=space_after,
+            apply_to_all=apply_to_all,
+        ):
+            return "문단 모양이 설정되었습니다."
+        else:
+            return errors.from_message("Error: 문단 모양 설정 실패")
+    except Exception as e:
+        logger.error(f"Error setting paragraph shape: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+def hwp_page_image(page: int = 0, resolution: int = 96, save_path: str = None) -> list:
+    """
+    현재 문서의 한 쪽을 한글 프로그램이 그린 모습 그대로 PNG 이미지로 만들어 돌려줍니다.
+    저장하지 않은 편집 내용도 반영됩니다.
+    - page: 쪽 번호(1부터, 문서 안의 실제 쪽 순서). 0이면 커서가 있는 쪽.
+    - resolution: DPI(24~300). 96이면 A4 한 쪽이 약 794x1123픽셀. 작은 글씨를 보려면 150.
+    - save_path: 이미지를 저장할 경로(.png/.jpg/.bmp/.gif). 비우면 임시 폴더에 저장.
+    """
+    try:
+        import tempfile
+        from mcp.server.fastmcp import Image
+
+        hwp = get_hwp_controller()
+        if not hwp:
+            return [errors.not_running()]
+        if page <= 0:
+            page = hwp.get_current_page()
+        if not save_path:
+            save_path = os.path.join(tempfile.gettempdir(), "hwp-mcp", f"page_{page:03d}.png")
+
+        ok, result = hwp.create_page_image(save_path, page, resolution)
+        if not ok:
+            return [errors.from_message(result)]
+        total = hwp.hwp.PageCount
+        info = f"{page}/{total}쪽 이미지 저장: {result}"
+        if os.path.splitext(result)[1].lower() in (".png", ".jpg", ".jpeg", ".gif"):
+            return [info, Image(path=result)]
+        return [info]
+    except Exception as e:
+        logger.error(f"Error creating page image: {str(e)}", exc_info=True)
+        return [errors.com_error(e)]
 
 if __name__ == "__main__":
     logger.info("Starting HWP MCP stdio server")
