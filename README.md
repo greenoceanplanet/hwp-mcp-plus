@@ -1,8 +1,7 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/jkf87-hwp-mcp-badge.png)](https://mseep.ai/app/jkf87-hwp-mcp)
-
 # HWP-MCP (한글 Model Context Protocol)
 
-[![GitHub](https://img.shields.io/github/license/jkf87/hwp-mcp)](https://github.com/jkf87/hwp-mcp)
+> 이 저장소는 [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp)를 포크해서 기능을 추가한 버전입니다.
+> 기본 구조와 초기 기능은 원본 저장소에서 왔고, 이 저장소에서는 검토형 편집(변경추적·일괄 수정), 표·그림 편집, 서식·스타일·메모 도구, 한글 창 인식 안정화 등을 더했습니다.
 
 HWP-MCP는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이 제어할 수 있도록 해주는 Model Context Protocol(MCP) 서버입니다. 이 프로젝트는 한글 문서를 자동으로 생성, 편집, 조작하는 기능을 AI에게 제공합니다.
 
