@@ -1,9 +1,9 @@
-# HWP-MCP (한글 Model Context Protocol)
+# HWP-MCP Plus (한글 Model Context Protocol)
 
 > 이 저장소는 [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp)를 포크해서 기능을 추가한 버전입니다.
 > 기본 구조와 초기 기능은 원본 저장소에서 왔고, 이 저장소에서는 검토형 편집(변경추적·일괄 수정), 표·그림 편집, 서식·스타일·메모 도구, 한글 창 인식 안정화 등을 더했습니다.
 
-HWP-MCP는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이 제어할 수 있도록 해주는 Model Context Protocol(MCP) 서버입니다. 이 프로젝트는 한글 문서를 자동으로 생성, 편집, 조작하는 기능을 AI에게 제공합니다.
+HWP-MCP Plus는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이 제어할 수 있도록 해주는 Model Context Protocol(MCP) 서버입니다. 이 프로젝트는 한글 문서를 자동으로 생성, 편집, 조작하는 기능을 AI에게 제공합니다.
 
 ## 주요 기능
 
@@ -29,8 +29,8 @@ HWP-MCP는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이 제�
 
 1. 저장소 클론:
 ```bash
-git clone https://github.com/greenoceanplanet/hwp-mcp.git
-cd hwp-mcp
+git clone https://github.com/greenoceanplanet/hwp-mcp-plus.git
+cd hwp-mcp-plus
 ```
 
 2. 의존성 설치:
@@ -42,14 +42,14 @@ uv sync          # Python 의존성 (.venv 생성)
 
 ### Claude와 함께 사용하기
 
-Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP 서버를 등록하세요:
+Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등록하세요:
 
 ```json
 {
   "mcpServers": {
     "hwp": {
       "command": "uv",
-      "args": ["run", "--directory", "경로/hwp-mcp", "hwp_mcp_stdio_server.py"],
+      "args": ["run", "--directory", "경로/hwp-mcp-plus", "hwp_mcp_stdio_server.py"],
       "env": { "HWP_MCP_TRACK_EDITS": "on" }
     }
   }
@@ -154,7 +154,7 @@ hwp_batch_operations([
 ## 프로젝트 구조
 
 ```
-hwp-mcp/
+hwp-mcp-plus/
 ├── hwp_mcp_stdio_server.py  # 메인 서버 스크립트
 ├── pyproject.toml           # Python 의존성 (uv)
 ├── uv.lock                  # Python 잠금 파일
