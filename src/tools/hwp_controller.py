@@ -1986,7 +1986,7 @@ class HwpController:
             if ext in ("bmp", "gif"):
                 ok = self.hwp.CreatePageImage(out_path, page - 1, resolution, 24, ext)
                 if not ok or not os.path.exists(out_path):
-                    return False, "한글이 쪽 이미지를 만들지 못했습니다."
+                    return False, f"한글이 쪽 이미지를 만들지 못했습니다(저장 시도 경로: {out_path})."
                 return True, out_path
 
             from PIL import Image as PILImage
@@ -1994,7 +1994,7 @@ class HwpController:
             try:
                 ok = self.hwp.CreatePageImage(tmp_bmp, page - 1, resolution, 24, "bmp")
                 if not ok or not os.path.exists(tmp_bmp):
-                    return False, "한글이 쪽 이미지를 만들지 못했습니다."
+                    return False, f"한글이 쪽 이미지를 만들지 못했습니다(저장 시도 경로: {tmp_bmp})."
                 with PILImage.open(tmp_bmp) as img:
                     img.convert("RGB").save(out_path, format="JPEG" if ext in ("jpg", "jpeg") else "PNG")
             finally:
