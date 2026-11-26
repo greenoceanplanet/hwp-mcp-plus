@@ -114,6 +114,16 @@ hwp_table_read(anchor="판매량")
 hwp_fill_table_grid(anchor="판매량", rows=[[None, None], [None, "125"], [None, None]])
 ```
 
+#### 전용 도구가 없는 기능: 액션 이름으로 실행
+```python
+hwp_action_help("셀 나누기")                      # 이름·설명으로 액션 찾기
+hwp_action_help("TableSplitCell")                 # 매개변수 항목(이름·형식·설명)
+hwp_run_action("ParagraphShape", {"AlignType": 3})  # 대화창 없이 매개변수로 실행
+```
+색인(`src/tools/data/hwp_actions.json`)은 한컴 공식 문서(ActionTable, ParameterSetTable)에서
+`scripts/build_action_index.py`로 만들고, 실행 중인 한글로 이름을 검증·보정한 것입니다.
+파일·인쇄·창·매크로 계열과 대화창을 여는 액션은 막혀 있습니다.
+
 #### 문서 저장
 ```python
 hwp_save()                      # 원래 파일에 덮어 저장(새 문서면 오류 → path 필요)

@@ -79,6 +79,12 @@ except ImportError:
     import hwp_review_helpers
 
 # 서식 조건 찾기·스타일·메모 헬퍼, 공통 오류 응답, 변경 추적 처리
+# 액션 이름 찾기·실행(공식 문서에서 만든 색인 사용)
+try:
+    from src.tools import hwp_action_tools
+except ImportError:
+    import hwp_action_tools
+
 try:
     from src.tools import hwp_format_helpers
     from src.tools import hwp_errors as errors
@@ -1089,6 +1095,58 @@ def hwp_table_split(anchor: str = "", rows: int = 1, cols: int = 2, occurrence: 
         return msg if ok else _table_shape_error(msg)
     except Exception as e:
         logger.error(f"Error splitting cell: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+
+@mcp.tool()
+def hwp_action_help(query: str) -> dict:
+    """
+    한글 액션(메뉴 기능의 내부 이름)과 그 매개변수를 찾아봅니다. hwp_run_action 전에 씀.
+    - query: 액션 이름(예: "TableSplitCell")이면 자세한 설명과 매개변수 항목(이름·형식·설명)을 돌려줌.
+      아니면 이름·설명에서 낱말로 찾음(예: "셀 나누기", "글자 색", "Bold").
+    색인은 한컴 공식 문서(ActionTable, ParameterSetTable)에서 만들었습니다.
+    verified=False는 지금 설치된 한글에서 확인되지 않은 이름입니다.
+    """
+    try:
+        detail = hwp_action_tools.describe((query or "").strip())
+        if detail:
+            return detail
+        hits = hwp_action_tools.search(query)
+        if not hits:
+            return {"error": errors.err(errors.NOT_FOUND, f"'{query}'에 맞는 액션이 없습니다.",
+                                        "더 짧은 낱말이나 다른 표현(한글 메뉴 이름, 영문 일부)으로 찾아보세요.")}
+        return {"count": len(hits), "actions": hits,
+                "next": "자세한 매개변수는 hwp_action_help(\"액션이름\")"}
+    except Exception as e:
+        logger.error(f"Error in action help: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
+
+
+@mcp.tool()
+@track_edits
+def hwp_run_action(action: str, params: dict = None, track: bool = None) -> str:
+    """
+    전용 도구가 없는 한글 기능을 액션 이름으로 실행합니다. 이름·매개변수는 먼저 hwp_action_help로 확인할 것.
+    - action: 액션 이름(예: "CharShapeBold", "TableSplitCell", "ParagraphShape").
+    - params: 매개변수 항목 {"항목": 값}. 하위 묶음(형식 SET)은 dict로. 예: {"AlignType": 3}
+      매개변수가 있는 액션은 기본값에 params만 바꿔 대화창 없이 실행합니다.
+    현재 커서·선택 위치에 적용됩니다(필요하면 먼저 hwp_find_text 등으로 위치를 잡을 것).
+    파일·인쇄·창·매크로 계열과 대화창을 여는 액션은 막혀 있습니다.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if isinstance(params, str):
+            params = json.loads(params) if params.strip() else None
+        ok, msg = hwp_action_tools.run_action(hwp.hwp, action, params)
+        if ok:
+            return msg
+        code = errors.NOT_FOUND if "액션이 없습니다" in msg else errors.INVALID_ARG
+        return errors.err(code, msg, "hwp_action_help로 액션 이름과 매개변수 항목을 확인하세요.")
+    except Exception as e:
+        logger.error(f"Error running action: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
 @mcp.tool()
