@@ -52,6 +52,26 @@ def restore_pos(h, pos) -> bool:
     return False
 
 
+def physical_page(h):
+    """커서가 있는 쪽의 순번(문서 맨 앞부터 1, 2, 3…). 알 수 없으면 None."""
+    try:
+        return int(h.XHwpDocuments.Active_XHwpDocument.XHwpDocumentInfo.CurrentPage) + 1
+    except Exception:
+        return None
+
+
+def printed_page(h):
+    """커서가 있는 쪽에 인쇄되는 쪽 번호. "새 번호로 시작" 때문에 순번과 다를 수 있음. 알 수 없으면 None.
+
+    KeyIndicator() 반환 (성공, 구역 수, 구역 번호, 쪽 번호, 단, 줄, 칸, 삽입/수정, 컨트롤 이름) 중 네 번째(실측).
+    """
+    try:
+        ki = h.KeyIndicator()
+        return int(ki[3]) if isinstance(ki, tuple) and len(ki) > 3 else None
+    except Exception:
+        return None
+
+
 def find_anchor(h, anchor: str, keep_selection: bool = False) -> bool:
     """문서 처음부터 anchor를 찾아 커서를 옮깁니다. 비면 현재 위치를 그대로 씁니다.
 

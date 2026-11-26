@@ -248,7 +248,7 @@ class FakeShapeFindHwp:
 def test_find_by_charshape_stops_on_wrap_and_resets_conditions():
     h = FakeShapeFindHwp([(5, "굵은말", 1), (30, "둘째", 2)])
     res = fh.find_by_charshape(h, "", {"Bold": 1})
-    assert [(r["text"], r["page"]) for r in res] == [("굵은말", 1), ("둘째", 2)]
+    assert [(r["text"], r["printed_page"]) for r in res] == [("굵은말", 1), ("둘째", 2)]
     first = h.executed[0]
     assert first["IgnoreFindString"] == 1 and first["FindCharShape"].items == {"Bold": 1}
     last = h.executed[-1]

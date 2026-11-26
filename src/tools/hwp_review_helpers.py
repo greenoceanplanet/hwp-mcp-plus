@@ -13,7 +13,9 @@ hwp_edit_helpers와 마찬가지로 한글 COM 객체(HWPFrame.HwpObject)를 직
 
 import logging
 
-from src.tools.hwp_edit_helpers import _insert_lines, _insert_plain, _is_picture, restore_pos, save_pos
+from src.tools.hwp_edit_helpers import (
+    _insert_lines, _insert_plain, _is_picture, physical_page, printed_page, restore_pos, save_pos,
+)
 from src.tools.hwp_tracking import track_scope
 
 logger = logging.getLogger("hwp-mcp-extended")
@@ -284,40 +286,68 @@ def get_page_text(h, page: int) -> str:
 # ---------------------------------------------------------------- 문서 구조 요약
 
 def _page_at_anchor(h, ctrl):
-    """컨트롤이 놓인 쪽 번호(1부터). 커서를 옮기므로 호출 전후로 위치를 저장/복원할 것."""
+    """컨트롤이 놓인 쪽의 (순번, 인쇄 쪽 번호). 커서를 옮기므로 호출 전후로 위치를 저장/복원할 것."""
     try:
-        anchor = ctrl.GetAnchorPos(0)
-        h.SetPosBySet(anchor)
-        info = h.XHwpDocuments.Active_XHwpDocument.XHwpDocumentInfo
-        return int(info.CurrentPage) + 1
+        h.SetPosBySet(ctrl.GetAnchorPos(0))
     except Exception:
-        return None
+        return None, None
+    return physical_page(h), printed_page(h)
 
 
+# 쪽 번호가 새로 시작될 수 있는 컨트롤: 구역 정의, 새 번호로 시작
+_NUMBERING_CTRLS = ("secd", "nwno")
 
 
 def _collect_controls(h, max_items: int = 200):
-    tables, pictures, others = [], [], {}
+    """표·그림 목록과 그 밖의 컨트롤 개수, 쪽 번호가 바뀔 수 있는 지점 [(순번, 인쇄 번호)]를 모읍니다."""
+    tables, pictures, others, numbering = [], [], {}, []
     ctrl = h.HeadCtrl
     while ctrl is not None:
         try:
             cid = ctrl.CtrlID
         except Exception:
             break
-        if cid == "tbl":
-            if len(tables) < max_items:
-                tables.append({"index": len(tables) + 1, "page": _page_at_anchor(h, ctrl)})
+        if cid == "tbl" or _is_picture(ctrl):
+            items = tables if cid == "tbl" else pictures
+            if len(items) < max_items:
+                page, printed = _page_at_anchor(h, ctrl)
+                items.append({"index": len(items) + 1, "page": page, "printed_page": printed})
             else:
-                tables.append(None)
-        elif _is_picture(ctrl):
-            if len(pictures) < max_items:
-                pictures.append({"index": len(pictures) + 1, "page": _page_at_anchor(h, ctrl)})
-            else:
-                pictures.append(None)
+                items.append(None)
         else:
             others[cid] = others.get(cid, 0) + 1
+            if cid in _NUMBERING_CTRLS:
+                numbering.append(_page_at_anchor(h, ctrl))
         ctrl = ctrl.Next
-    return tables, pictures, others
+    return tables, pictures, others, numbering
+
+
+def _page_numbering(starts, total):
+    """
+    쪽 순번과 인쇄 쪽 번호의 대응을 구간으로 요약합니다.
+    starts: 문서 순서대로 [(순번, 그 쪽의 인쇄 번호)] — 번호가 바뀔 수 있는 지점들.
+    번호가 앞 구간에서 그대로 이어지는 지점은 합칩니다.
+    Returns: [{"pages": "1-2", "printed": "1-2"}, {"pages": "3-20", "printed": "1-18"}]
+    """
+    by_page = {}
+    for page, printed in starts:
+        if page and printed is not None:
+            by_page[page] = printed  # 같은 쪽에 여럿이면 뒤의 것(문서 순서상 나중)이 이김
+    segs = []  # [순번 시작, 인쇄 번호 시작]
+    for page in sorted(by_page):
+        printed = by_page[page]
+        if segs and printed == segs[-1][1] + (page - segs[-1][0]):
+            continue  # 앞 구간에서 번호가 그대로 이어짐
+        segs.append([page, printed])
+
+    def span(a, b):
+        return str(a) if a == b else f"{a}-{b}"
+
+    out = []
+    for i, (page, printed) in enumerate(segs):
+        end = segs[i + 1][0] - 1 if i + 1 < len(segs) else (total or page)
+        out.append({"pages": span(page, end), "printed": span(printed, printed + end - page)})
+    return out
 
 
 def _scan_get_text(h):
@@ -408,7 +438,8 @@ def scan_document(h, include_headings: bool = True) -> dict:
             result["pages"] = int(h.PageCount)
         except Exception:
             pass
-        tables, pictures, others = _collect_controls(h)
+        tables, pictures, others, numbering = _collect_controls(h)
+        result["page_numbering"] = _page_numbering(numbering, result["pages"])
         result["table_count"] = len(tables)
         result["picture_count"] = len(pictures)
         result["tables"] = [t for t in tables if t]

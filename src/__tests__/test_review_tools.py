@@ -296,6 +296,11 @@ class FakeScanHwp:
     def SetPosBySet(self, ctrl):
         self.page = ctrl.page
 
+    printed_map = {}  # 순번 → 인쇄 번호. 없으면 순번 그대로
+
+    def KeyIndicator(self):
+        return (True, 1, 1, self.printed_map.get(self.page, self.page), 1, 1, 1, 0, "")
+
     def InitScan(self, *_):
         return True
 
@@ -335,8 +340,10 @@ def test_scan_document_summary():
     r = rh.scan_document(h)
     assert r["pages"] == 3
     assert r["table_count"] == 2
-    assert r["tables"] == [{"index": 1, "page": 1}, {"index": 2, "page": 3}]
-    assert r["pictures"] == [{"index": 1, "page": 2}]
+    assert r["tables"] == [{"index": 1, "page": 1, "printed_page": 1},
+                           {"index": 2, "page": 3, "printed_page": 3}]
+    assert r["pictures"] == [{"index": 1, "page": 2, "printed_page": 2}]
+    assert r["page_numbering"] == [{"pages": "1-3", "printed": "1-3"}]
     assert r["other_controls"] == {"secd": 1}
     assert r["headings"] == [{"level": 1, "number": "1.", "text": "1. 개요"},
                              {"level": 2, "number": "가.", "text": "가. 세부 이어짐"}]
@@ -386,3 +393,24 @@ def test_save_document_pdf_keeps_current_path(tmp_path):
     args = c.hwp.SaveAs.call_args[0]
     assert args[1] == "PDF"
     assert c.current_document_path == r"C:\doc\a.hwp"
+
+
+def test_scan_document_page_numbering_restart():
+    """표지 2쪽 뒤 3쪽에서 '새 번호로 시작(1)' → 순번 3-20 = 인쇄 1-18 (실제 문서 실측 형태)."""
+    ctrls = [FakeCtrl("secd", 1), FakeCtrl("tbl", 1, rows=1, cols=1),
+             FakeCtrl("nwno", 3), FakeCtrl("nwno", 3), FakeCtrl("tbl", 10, rows=1, cols=1)]
+    h = FakeScanHwp(ctrls, [(1, "")], [])
+    h.PageCount = 20
+    h.printed_map = {p: p - 2 for p in range(3, 21)}
+    r = rh.scan_document(h, include_headings=False)
+    assert r["page_numbering"] == [{"pages": "1-2", "printed": "1-2"},
+                                   {"pages": "3-20", "printed": "1-18"}]
+    assert r["tables"][1] == {"index": 2, "page": 10, "printed_page": 8}
+    assert r["other_controls"] == {"secd": 1, "nwno": 2}
+    assert h.restored == (0, 5, 7)
+
+
+def test_page_numbering_single_page_and_unknown():
+    assert rh._page_numbering([(1, 1), (2, 5)], 2) == [{"pages": "1", "printed": "1"},
+                                                       {"pages": "2", "printed": "5"}]
+    assert rh._page_numbering([(None, None)], 3) == []

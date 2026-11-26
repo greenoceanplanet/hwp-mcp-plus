@@ -468,7 +468,8 @@ def hwp_get_text(start_text: str = "", max_chars: int = 0, page: int = 0) -> str
     현재 문서의 글자를 읽습니다. 인자를 비우면 문서 전체.
     - start_text: 이 글자가 처음 나오는 곳부터 읽음(문서 처음부터 첫 번째). 비우면 문서 처음부터.
     - max_chars: 최대 글자 수. 0이면 끝까지.
-    - page: 쪽 번호(1부터). 주면 그 쪽의 글자만 읽음(표·글상자 포함). start_text와 함께 쓰지 않음.
+    - page: 쪽 순번(문서 맨 앞부터 1, 2, 3…; 인쇄된 쪽 번호와 다를 수 있음 → hwp_scan_document의 page_numbering).
+      주면 그 쪽의 글자만 읽음(표·글상자 포함). start_text와 함께 쓰지 않음.
     긴 문서에서 한 절만 볼 때 예: start_text="3. 용산공원", max_chars=3000
     """
     try:
@@ -1732,8 +1733,11 @@ def hwp_scan_document(include_headings: bool = True) -> dict:
     현재 문서의 구조를 요약합니다. 긴 문서를 고치기 전에 먼저 훑어볼 때 씁니다.
     Returns:
       pages: 쪽 수
-      table_count / tables: [{"index", "page"}]  (최대 200개까지 상세. 표 내용은 hwp_table_view)
-      picture_count / pictures: [{"index", "page"}]
+      page_numbering: 쪽 순번과 인쇄 쪽 번호의 대응. 예: [{"pages": "1-2", "printed": "1-2"}, {"pages": "3-20", "printed": "1-18"}]
+        → 사용자가 말하는 "5쪽"은 보통 인쇄 번호. 이 표로 순번으로 바꿔 hwp_get_text(page=)·hwp_page_image(page=)에 넘길 것.
+          같은 인쇄 번호가 여러 구간에 있으면(표지 1쪽, 본문 1쪽 등) 어느 쪽인지 사용자에게 확인.
+      table_count / tables: [{"index", "page"(순번), "printed_page"(인쇄 번호)}]  (최대 200개까지 상세. 표 내용은 hwp_table_view)
+      picture_count / pictures: [{"index", "page", "printed_page"}]
       other_controls: 그 밖의 개체 종류별 개수(CtrlID 기준)
       headings: 개요 문단 [{"level", "number", "text"}]  (include_headings=False면 생략, 표 안 문단 제외)
     커서 위치는 원래대로 돌려놓습니다. 특정 쪽 글자는 hwp_get_text(page=n).
@@ -1766,7 +1770,7 @@ def hwp_search_format(
     - text_color: "#RRGGBB" 또는 red/blue/green/black/gray 등.
     - font_name: 글꼴 이름 일부(예: "돋움", "HY견고딕"). 이 조건이 있으면 문서를 HWPML로 읽어 판정하므로 쪽 번호(page)는 null.
     여러 조건은 모두 만족(AND). 문서는 바꾸지 않고 커서도 원래 자리로 돌려놓습니다.
-    Returns: {"method": "find"|"hwpml", "count", "matches": [{"index", "text", "page", ...}]}
+    Returns: {"method": "find"|"hwpml", "count", "matches": [{"index", "text", "page"(순번), "printed_page"(인쇄 쪽 번호), ...}]}
     """
     try:
         hwp = get_hwp_controller()
@@ -2231,7 +2235,8 @@ def hwp_page_image(page: int = 0, resolution: int = 96, save_path: str = None) -
     """
     현재 문서의 한 쪽을 한글 프로그램이 그린 모습 그대로 PNG 이미지로 만들어 돌려줍니다.
     저장하지 않은 편집 내용도 반영됩니다.
-    - page: 쪽 번호(1부터, 문서 안의 실제 쪽 순서). 0이면 커서가 있는 쪽.
+    - page: 쪽 순번(문서 맨 앞부터 1, 2, 3…; 인쇄된 쪽 번호와 다를 수 있음 → hwp_scan_document의 page_numbering).
+      0이면 커서가 있는 쪽.
     - resolution: DPI(24~300). 96이면 A4 한 쪽이 약 794x1123픽셀. 작은 글씨를 보려면 150.
     - save_path: 이미지를 저장할 경로(.png/.jpg/.bmp/.gif). 비우면 임시 폴더에 저장.
     """

@@ -14,7 +14,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 
-from src.tools.hwp_edit_helpers import _insert_lines
+from src.tools.hwp_edit_helpers import _insert_lines, physical_page, printed_page
 
 logger = logging.getLogger("hwp-mcp-extended")
 
@@ -96,14 +96,6 @@ def _pos_key(h):
         return None
 
 
-def _current_page(h):
-    try:
-        ki = h.KeyIndicator()
-        return int(ki[3]) if isinstance(ki, tuple) and len(ki) > 3 else None
-    except Exception:
-        return None
-
-
 def _selected_text(h) -> str:
     try:
         return h.GetTextFile("UNICODE", "saveblock") or ""
@@ -164,7 +156,7 @@ def find_by_charshape(h, text: str, cond: dict, max_results: int = 50) -> list:
     """
     글자모양 조건(cond)에 맞는 글자를 문서 처음부터 찾아 목록으로 돌려줍니다.
     text가 있으면 그 글자 중 조건에 맞는 것만. 커서는 원래 자리로 돌려놓습니다.
-    Returns: [{"index", "text", "page"}]
+    Returns: [{"index", "text", "page"(순번), "printed_page"(인쇄 쪽 번호)}]
     """
     saved = None
     try:
@@ -185,7 +177,8 @@ def find_by_charshape(h, text: str, cond: dict, max_results: int = 50) -> list:
                     break  # 문서 처음으로 되돌아감
                 last = cur
                 found = _selected_text(h).replace("\r\n", "\n").strip("\n")
-                results.append({"index": len(results) + 1, "text": found, "page": _current_page(h)})
+                results.append({"index": len(results) + 1, "text": found,
+                                "page": physical_page(h), "printed_page": printed_page(h)})
     finally:
         reset_find_conditions(h)
         try:
