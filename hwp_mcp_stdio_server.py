@@ -670,31 +670,6 @@ def hwp_find_text(text: str) -> str:
         return errors.com_error(e)
 
 @mcp.tool()
-@track_edits
-def hwp_replace_text(find: str, replace: str, replace_all: bool = True, track: bool = None) -> str:
-    """
-    문서 내에서 지정한 텍스트를 찾아 바꿉니다.
-
-    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
-    """
-    try:
-        if not find:
-            return errors.from_message("Error: Find text is required")
-
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        if hwp.replace_text(find, replace, replace_all):
-            logger.info(f"Replaced text: '{find}' -> '{replace}' (replace_all={replace_all})")
-            return f"Text replaced: '{find}' -> '{replace}'"
-        else:
-            return errors.err(errors.NOT_FOUND, f"바꿀 글자를 찾지 못했거나 바꾸기에 실패했습니다: {find}")
-    except Exception as e:
-        logger.error(f"Error replacing text: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
 def hwp_ping_pong(message: str = "핑") -> str:
     """MCP 작동 확인을 위한 핑퐁 테스트 함수입니다."""
     try:

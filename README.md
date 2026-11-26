@@ -57,7 +57,7 @@ Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등
 ```
 
 #### 변경추적 기본값 (`HWP_MCP_TRACK_EDITS`)
-기존 문서를 고치는 도구(`hwp_patch`, `hwp_replace_selection`, `hwp_replace_text`, `hwp_insert_at`, `hwp_insert_text`,
+기존 문서를 고치는 도구(`hwp_patch`, `hwp_replace_selection`, `hwp_insert_at`, `hwp_insert_text`,
 `hwp_fill_cells`, `hwp_fill_table_grid`, `hwp_fill_table_with_data`, `hwp_fill_column_numbers`, `hwp_table_insert/delete`,
 `hwp_copy_format`, `hwp_set_style`, `hwp_set_paragraph_shape`, 그림 넣기·바꾸기·지우기, `hwp_fields` put)는
 작업하는 동안 변경추적을 켜서 고친 내용을 '제안'으로 남기고, 끝나면(오류가 나도) 작업 전 설정으로 되돌립니다.

@@ -1053,52 +1053,6 @@ class HwpController:
             print(f"텍스트 찾기 실패: {e}")
             return False
 
-    def replace_text(self, find_text: str, replace_text: str, replace_all: bool = True) -> bool:
-        """
-        문서에서 텍스트를 찾아 바꿉니다.
-        Find → 선택 → 삭제 → 삽입 방식으로 동작하여 변경 추적 모드에서도 정상 작동합니다.
-
-        Args:
-            find_text (str): 찾을 텍스트
-            replace_text (str): 바꿀 텍스트
-            replace_all (bool): 사용하지 않음 (하위 호환 유지용)
-
-        Returns:
-            bool: 바꾸기 성공 여부
-        """
-        try:
-            if not self.is_hwp_running:
-                return False
-
-            # 문서 처음으로 이동
-            self.hwp.HAction.Run("MoveDocBegin")
-
-            # 텍스트 찾기 (찾으면 해당 범위가 선택됨)
-            pset = self.hwp.HParameterSet.HFindReplace
-            self.hwp.HAction.GetDefault("RepeatFind", pset.HSet)
-            pset.FindString = find_text
-            pset.FindRegExp = 0
-            pset.IgnoreMessage = 1
-            pset.Direction = 0
-            found = self.hwp.HAction.Execute("RepeatFind", pset.HSet)
-
-            if not found:
-                return False
-
-            # 선택된 텍스트를 새 텍스트로 교체 (변경 추적 시 삭제+삽입으로 기록됨)
-            if replace_text:
-                pset2 = self.hwp.HParameterSet.HInsertText
-                self.hwp.HAction.GetDefault("InsertText", pset2.HSet)
-                pset2.Text = replace_text
-                self.hwp.HAction.Execute("InsertText", pset2.HSet)
-            else:
-                # 빈 문자열로 교체 = 선택 텍스트 삭제
-                self.hwp.HAction.Run("Delete")
-            return True
-        except Exception as e:
-            print(f"텍스트 바꾸기 실패: {e}")
-            return False
-
     def get_text(self) -> str:
         """
         현재 문서의 전체 텍스트를 가져옵니다.
