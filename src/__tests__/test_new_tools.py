@@ -302,11 +302,56 @@ def test_controller_find_text_restores_on_failure():
     c.hwp.SetPos.assert_called_with(0, 42, 7)
 
 
-def test_find_and_get_cell_always_restores():
-    c = HwpController()
-    c.hwp = _search_mock(found=True)
-    c.is_hwp_running = True
-    c._get_cell_text_by_clipboard = lambda: "셀 내용"
-    ok, text = c.find_and_get_cell("성명")
-    assert ok and text == "셀 내용"
-    c.hwp.SetPos.assert_called_with(0, 42, 7)
+
+# ---------------------------------------------------------------- 표 읽기(HWPML)·표 빠져나오기
+
+from src.tools import hwp_format_helpers as fh
+
+
+def _cell(r, c, text, rs=1, cs=1, nested=""):
+    return (f'<CELL ColAddr="{c}" RowAddr="{r}" ColSpan="{cs}" RowSpan="{rs}"><PARALIST>'
+            f'<P><TEXT><CHAR>{text}</CHAR>{nested}</TEXT></P></PARALIST></CELL>')
+
+
+TABLE_XML = (
+    '<HWPML><BODY><SECTION><P><TEXT>'
+    '<TABLE RowCount="2" ColCount="3"><ROW>'
+    + _cell(0, 0, "구분", rs=2) + _cell(0, 1, "성명") + _cell(0, 2, "전화") +
+    '</ROW><ROW>' + _cell(1, 1, "홍길동") +
+    _cell(1, 2, "010", nested='<TABLE RowCount="1" ColCount="1"><ROW>' + _cell(0, 0, "안쪽") + '</ROW></TABLE>') +
+    '</ROW></TABLE></TEXT></P></SECTION></BODY></HWPML>'
+)
+
+
+def test_read_tables_rows_merged_and_nested():
+    tables = fh.read_tables(TABLE_XML)
+    assert len(tables) == 2  # 바깥 표 + 셀 안의 표
+    outer, inner = tables
+    assert outer["rows"] == [["구분", "성명", "전화"], ["홍길동", "010"]]  # 병합으로 가려진 칸은 빠짐
+    assert outer["merged"] == [{"row": 1, "col": 1, "rowspan": 2, "colspan": 1, "text": "구분"}]
+    assert (outer["row_count"], outer["col_count"]) == (2, 3)
+    assert inner["index"] == 2 and inner["rows"] == [["안쪽"]]
+
+
+def test_find_table_by_anchor_and_occurrence():
+    tables = fh.read_tables(TABLE_XML)
+    assert fh.find_table(tables, "홍길동")["index"] == 1
+    assert fh.find_table(tables, "안쪽")["index"] == 2  # 바깥 셀 글자에는 안쪽 표 글자가 들어가지 않음
+    assert fh.find_table(tables, "홍길동", 2) is None
+    assert fh.find_table(tables, "없음") is None
+
+
+def test_leave_table_moves_after_table_control():
+    h = MagicMock()
+    pos = iter([(8, 0, 3), (0, 1, 0)])  # 셀 안 → CloseEx 후 표 컨트롤 앞
+    h.GetPos.side_effect = lambda: next(pos)
+    assert eh.leave_table(h)
+    h.HAction.Run.assert_any_call("CloseEx")
+    h.SetPos.assert_called_with(0, 1, 1)  # 한 칸 뒤로 주면 한글이 표 바로 뒤로 맞춤
+
+
+def test_leave_table_noop_in_body():
+    h = MagicMock()
+    h.GetPos.return_value = (0, 3, 2)
+    assert eh.leave_table(h)
+    h.HAction.Run.assert_not_called()

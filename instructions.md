@@ -9,23 +9,23 @@ This file contains detailed instructions, schemas, syntax guidelines, and exampl
 
 ---
 
-## 1. hwp_table_view
+## 1. hwp_table_read
 
-Provides a structural snapshot of cells around the cursor. 
+Reads every cell of one table from HWPML. Does not move the cursor or touch the clipboard.
+
+*   `anchor` (+ `occurrence`): the table whose cell text contains this string.
+*   `index`: the n-th table in document order (nested tables count). With neither, returns a list of tables.
 
 ### Output Format
-Returns a dictionary representing surrounding cells:
 ```json
 {
-  "center": "Current cell text",
-  "up_1": "Text of cell 1 step above",
-  "down_1": "Text of cell 1 step below",
-  "left_1": "Text of cell 1 step left",
-  "right_1": "Text of cell 1 step right",
-  "up_2": "Text of cell 2 steps above",
-  ...
+  "index": 1, "row_count": 3, "col_count": 3,
+  "rows": [["이름", "소속", "전화"], ["홍길동", "기획팀", "010-1111"]],
+  "merged": [{"row": 1, "col": 1, "rowspan": 2, "colspan": 1, "text": "..."}]
 }
 ```
+`rows` lists only real cells per row (cells hidden by a merge are left out), in Tab order —
+the same shape `hwp_fill_table_grid` takes, so you can edit it and pass it back.
 
 ---
 
@@ -34,9 +34,8 @@ Returns a dictionary representing surrounding cells:
 Batch fills multiple table cells using path instructions relative to labels.
 
 ### Usage Protocol
-1.  Find starting point using `hwp_find_and_show_cell("LabelName")`.
-2.  Optionally check the layout using `hwp_table_view()`.
-3.  Fill cells using relative directions.
+1.  Check the layout first with `hwp_table_read(anchor="LabelName")` (does not move the cursor).
+2.  Fill cells using relative directions.
 
 ### Path Syntax & Directional Keywords
 *   **Keywords**: `<left>`, `<right>`, `<up>`, `<down>`

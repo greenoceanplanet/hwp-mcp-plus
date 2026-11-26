@@ -528,6 +528,25 @@ def _fill_current_cell(h, value: str):
     h.HAction.Run("Cancel")
 
 
+def leave_table(h) -> bool:
+    """커서가 표 셀 안이면 표 바로 뒤로 옮깁니다.
+
+    CloseEx는 커서를 표 컨트롤 앞(부모 목록)에 두고, 거기서 MoveRight를 하면 다시 표 안으로 들어감.
+    그래서 위치를 1 늘려 SetPos하면 한글이 표 컨트롤 바로 뒤로 맞춰 줌(실측: (0,1,0) → (0,1,8)).
+    """
+    try:
+        if h.GetPos()[0] == 0:
+            return True
+        h.HAction.Run("Cancel")
+        if not h.HAction.Run("CloseEx"):
+            return False
+        lst, para, pos = h.GetPos()
+        h.SetPos(lst, para, pos + 1)
+        return True
+    except Exception:
+        return False
+
+
 def fill_table_grid(h, anchor: str, rows, skip_empty: bool = True):
     """anchor가 든 표의 왼쪽 위 셀부터 행 우선(TableRightCell 순서)으로 rows 값을 채웁니다. (성공여부, 메시지)
 

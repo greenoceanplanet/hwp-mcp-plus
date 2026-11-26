@@ -76,13 +76,13 @@ Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등
 
 #### 변경추적 기본값 (`HWP_MCP_TRACK_EDITS`)
 기존 문서를 고치는 도구(`hwp_patch`, `hwp_replace_selection`, `hwp_insert_at`, `hwp_insert_text`,
-`hwp_fill_cells`, `hwp_fill_table_grid`, `hwp_fill_table_with_data`, `hwp_fill_column_numbers`, `hwp_table_insert/delete`,
+`hwp_fill_cells`, `hwp_fill_table_grid`, `hwp_table_insert/delete`,
 `hwp_copy_format`, `hwp_set_style`, `hwp_set_paragraph_shape`, 그림 넣기·바꾸기·지우기, `hwp_fields` put)는
 작업하는 동안 변경추적을 켜서 고친 내용을 '제안'으로 남기고, 끝나면(오류가 나도) 작업 전 설정으로 되돌립니다.
 
 - 우선순위: 도구 인자 `track`(True/False) > 환경변수 `HWP_MCP_TRACK_EDITS`(on/off) > 기본 on
 - 프로젝트마다 다르게 쓰려면 그 프로젝트의 `.mcp.json`에서 `env`의 값을 바꿉니다.
-- 새 문서를 만드는 도구(`hwp_create`, `hwp_create_table_with_data` 등)는 대상이 아닙니다.
+- 새 문서·새 표를 만드는 도구(`hwp_create`, `hwp_insert_table`)는 대상이 아닙니다.
 - 검토가 끝나면 `hwp_track_changes_resolve("apply_all")`(모두 수락) 또는 `"cancel_all"`(모두 거절).
 
 #### 오류 응답 형식
@@ -104,20 +104,14 @@ hwp_insert_text("원하는 텍스트를 입력하세요.")
 
 #### 테이블 생성 및 데이터 입력
 ```python
-# 테이블 생성
-hwp_insert_table(rows=5, cols=2)
+# 커서 위치에 표를 넣고 바로 채우기
+hwp_insert_table(rows=3, cols=2, data=[["월", "판매량"], ["1월", "120"], ["2월", "150"]])
 
-# 테이블에 데이터 채우기
-hwp_fill_table_with_data([
-    ["월", "판매량"], 
-    ["1월", "120"], 
-    ["2월", "150"], 
-    ["3월", "180"], 
-    ["4월", "200"]
-], has_header=True)
+# 표 읽기(커서·클립보드를 건드리지 않음). rows는 hwp_fill_table_grid에 그대로 넘길 수 있는 모양
+hwp_table_read(anchor="판매량")
 
-# 표에 연속된 숫자 채우기
-hwp_fill_column_numbers(start=1, end=10, column=1, from_first_cell=True)
+# 기존 표를 통째로 채우기(null은 건드리지 않음)
+hwp_fill_table_grid(anchor="판매량", rows=[[None, None], [None, "125"], [None, None]])
 ```
 
 #### 문서 저장
@@ -170,7 +164,6 @@ hwp-mcp-plus/
 ├── src/
 │   ├── tools/
 │   │   ├── hwp_controller.py  # 한글 제어 핵심 컨트롤러
-│   │   ├── hwp_table_tools.py # 테이블 관련 기능 전문 모듈
 │   │   ├── hwp_edit_helpers.py   # 찾은 글자 기준 삽입·서식 복사·그림 헬퍼
 │   │   ├── hwp_review_helpers.py # 일괄 수정·변경 추적·누름틀·문서 구조 헬퍼
 │   │   ├── hwp_format_helpers.py # 서식 조건 찾기·스타일·메모 헬퍼(HWPML 읽기 포함)

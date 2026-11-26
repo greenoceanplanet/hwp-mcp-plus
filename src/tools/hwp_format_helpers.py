@@ -439,3 +439,46 @@ def list_memos(xml: str) -> list:
     for m in memos:
         m["target"] = m["target"].strip()
     return memos
+
+
+# ---------------------------------------------------------------- 표 읽기
+
+def _cell_text(cell) -> str:
+    """셀 글자. 셀 안 문단은 줄바꿈으로 잇고, 셀 안에 든 표(중첩 표)·메모 내용은 넣지 않음."""
+    paras = []
+    for pl in cell.findall("PARALIST"):
+        for p in pl.findall("P"):
+            paras.append(_para_text_excluding_memo(p))
+    return "\n".join(paras).strip()
+
+
+def read_tables(xml: str) -> list:
+    """
+    문서의 모든 표를 문서 순서(바깥 표 다음에 그 안의 표)로 읽습니다. 커서·클립보드를 건드리지 않음.
+    Returns: [{"index", "row_count", "col_count", "rows", "merged"}]
+      rows: 행마다 실제 셀의 글자 목록(Tab 순서. 병합으로 가려진 칸은 없음) → hwp_fill_table_grid의 rows와 같은 모양
+      merged: 병합 셀 [{"row", "col", "rowspan", "colspan", "text"}] (1부터). 없으면 []
+    """
+    root = parse_hwpml(xml)
+    tables = []
+    for t in root.iter("TABLE"):
+        rows, merged = [], []
+        for row in t.findall("ROW"):
+            texts = []
+            for cell in row.findall("CELL"):
+                text = _cell_text(cell)
+                texts.append(text)
+                rs, cs = int(cell.get("RowSpan", 1)), int(cell.get("ColSpan", 1))
+                if rs > 1 or cs > 1:
+                    merged.append({"row": int(cell.get("RowAddr", 0)) + 1, "col": int(cell.get("ColAddr", 0)) + 1,
+                                   "rowspan": rs, "colspan": cs, "text": text})
+            rows.append(texts)
+        tables.append({"index": len(tables) + 1, "row_count": int(t.get("RowCount", len(rows))),
+                       "col_count": int(t.get("ColCount", 0)), "rows": rows, "merged": merged})
+    return tables
+
+
+def find_table(tables: list, anchor: str, occurrence: int = 1):
+    """셀 글자에 anchor가 들어 있는 표 중 occurrence번째(1부터). 없으면 None."""
+    hits = [t for t in tables if any(anchor in c for r in t["rows"] for c in r)]
+    return hits[occurrence - 1] if 0 < occurrence <= len(hits) else None

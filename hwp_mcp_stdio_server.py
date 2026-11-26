@@ -66,21 +66,6 @@ except ImportError as e:
         print(f"Error: Could not find HwpController module", file=sys.stderr)
         sys.exit(1)
 
-# Try to import HwpTableTools
-try:
-    from src.tools.hwp_table_tools import HwpTableTools
-    logger.info("HwpTableTools imported successfully")
-except ImportError as e:
-    logger.error(f"Failed to import HwpTableTools: {str(e)}")
-    # Try alternate paths
-    try:
-        from hwp_table_tools import HwpTableTools
-        logger.info("HwpTableTools imported from alternate path")
-    except ImportError as e2:
-        logger.error(f"Could not find HwpTableTools in any path: {str(e2)}")
-        print(f"Error: Could not find HwpTableTools module", file=sys.stderr)
-        sys.exit(1)
-
 # 찾은 글자 기준 삽입·서식 복사 헬퍼(COM 객체를 직접 받음)
 try:
     from src.tools import hwp_edit_helpers
@@ -112,12 +97,10 @@ mcp = FastMCP(
 
 # Global HWP controller instance
 hwp_controller = None
-# Global HWP table tools instance
-hwp_table_tools = None
 
 def get_hwp_controller():
     """Get or create HwpController instance. Auto-reconnects if connection is lost."""
-    global hwp_controller, hwp_table_tools
+    global hwp_controller
 
     # 연결 상태 확인 및 재연결
     if hwp_controller is not None:
@@ -127,7 +110,6 @@ def get_hwp_controller():
         except Exception as e:
             logger.warning(f"HWP connection lost ({e}), attempting to reconnect...")
             hwp_controller = None
-            hwp_table_tools = None
 
     if hwp_controller is None:
         logger.info("Creating HwpController instance...")
@@ -137,8 +119,6 @@ def get_hwp_controller():
             if not connected:
                 logger.warning("Failed to connect to HWP program on startup, but returning controller instance for manual reconnection/switching.")
 
-            # 테이블 도구 인스턴스도 초기화
-            hwp_table_tools = HwpTableTools(hwp_controller)
             logger.info("HwpController instance created")
         except Exception as e:
             logger.error(f"Error creating HwpController: {str(e)}", exc_info=True)
@@ -153,15 +133,6 @@ def _get_com():
 # 기존 문서를 고치는 도구에 붙이는 변경 추적 데코레이터.
 # 도구 인자 track(True/False) > 환경변수 HWP_MCP_TRACK_EDITS(on/off) > 기본 on. 끝나면 작업 전 값으로 되돌림.
 track_edits = tracked_edit(_get_com)
-
-def get_hwp_table_tools():
-    """Get or create HwpTableTools instance."""
-    global hwp_table_tools, hwp_controller
-    if hwp_table_tools is None:
-        hwp_controller = get_hwp_controller()
-        if hwp_controller:
-            hwp_table_tools = HwpTableTools(hwp_controller)
-    return hwp_table_tools
 
 @mcp.tool()
 def hwp_create() -> str:
@@ -432,18 +403,76 @@ def hwp_set_font(
         return errors.com_error(e)
 
 @mcp.tool()
-def hwp_insert_table(rows: int, cols: int) -> str:
-    """Insert a table at the current cursor position."""
+def hwp_insert_table(rows: int, cols: int, data: list = None) -> str:
+    """
+    현재 커서 위치에 rows x cols 표를 넣고, data가 있으면 채웁니다.
+    - data: [[1행 값...], [2행 값...]] (선택). 값이 null이거나 ""이면 빈 칸. 숫자도 됨. 줄바꿈(\\n)은 셀 안 문단 나눔.
+      표보다 많은 값은 버림.
+    커서가 표 안에 있으면 표 속에 표가 생기므로 거부합니다.
+    끝나면 커서는 표 바로 뒤(본문)에 있습니다.
+    기존 표를 채우려면 hwp_fill_table_grid, 레이블 옆 칸은 hwp_fill_cells.
+    """
     try:
-        # HwpTableTools 인스턴스 가져오기
-        table_tools = get_hwp_table_tools()
-        if not table_tools:
-            return errors.from_message("Error: Failed to get table tools instance")
-        
-        return table_tools.insert_table(rows, cols)
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        if isinstance(data, str):
+            data = json.loads(data)
+        if hwp.is_cursor_in_table():
+            return errors.err(errors.INVALID_ARG,
+                              "커서가 표 안에 있어 새 표를 만들지 않았습니다(표 속에 표가 생김).",
+                              "커서를 표 밖으로 옮긴 뒤 다시 호출하세요. 기존 표를 채우려면 hwp_fill_table_grid.")
+        if not hwp.insert_table(rows, cols):
+            return errors.from_message(f"Error: 표를 넣지 못했습니다 - {hwp.last_error or '원인 불명'}")
+        msg = f"표를 넣었습니다({rows}x{cols})."
+        if data:
+            ok, fill_msg = hwp_edit_helpers.fill_table_grid(hwp.hwp, "", data, skip_empty=True)
+            msg += " " + fill_msg
+            if not ok:
+                return errors.from_message(f"Error: {msg}")
+        hwp_edit_helpers.leave_table(hwp.hwp)
+        return msg
     except Exception as e:
         logger.error(f"Error inserting table: {str(e)}", exc_info=True)
         return errors.com_error(e)
+
+
+@mcp.tool()
+def hwp_table_read(anchor: str = "", occurrence: int = 1, index: int = 0) -> dict:
+    """
+    표 하나의 모든 셀 글자를 읽습니다. 커서와 클립보드를 건드리지 않습니다(문서를 HWPML로 읽음).
+    - anchor: 셀 안에 이 글자가 들어 있는 표. occurrence: 그런 표가 여럿이면 몇 번째(1부터).
+    - index: 문서 순서상 몇 번째 표(1부터. 표 안의 표도 셈). anchor 대신 씀.
+    - 둘 다 비우면 모든 표의 목록(번호, 크기, 첫 행)만 돌려줌.
+    Returns: {"index", "row_count", "col_count", "rows", "merged"}
+      rows: 행마다 실제 셀 글자 목록(Tab 순서, 병합으로 가려진 칸은 빠짐). hwp_fill_table_grid의 rows와 같은 모양이라
+            읽은 rows를 고쳐서 그대로 넘기면 됨.
+      merged: 병합 셀 [{"row", "col", "rowspan", "colspan", "text"}] (1부터)
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return {"error": errors.not_running()}
+        tables = hwp_format_helpers.read_tables(hwp_format_helpers.read_hwpml(hwp.hwp))
+        if not tables:
+            return {"error": errors.err(errors.NOT_FOUND, "문서에 표가 없습니다.")}
+        if anchor:
+            t = hwp_format_helpers.find_table(tables, anchor, max(1, int(occurrence or 1)))
+            if t is None:
+                return {"error": errors.err(errors.NOT_FOUND, f"'{anchor}'가 든 표를 찾지 못했습니다"
+                                            f"{f'({occurrence}번째)' if occurrence and occurrence > 1 else ''}.",
+                                            "hwp_table_read()로 표 목록을 먼저 확인하세요.")}
+            return t
+        if index:
+            if not 1 <= index <= len(tables):
+                return {"error": errors.err(errors.INVALID_ARG, f"표 번호는 1~{len(tables)}입니다: {index}")}
+            return tables[index - 1]
+        return {"count": len(tables),
+                "tables": [{"index": t["index"], "row_count": t["row_count"], "col_count": t["col_count"],
+                            "first_row": t["rows"][0] if t["rows"] else []} for t in tables]}
+    except Exception as e:
+        logger.error(f"Error reading table: {str(e)}", exc_info=True)
+        return {"error": errors.com_error(e)}
 
 @mcp.tool()
 def hwp_insert_paragraph() -> str:
@@ -671,254 +700,6 @@ def hwp_find_text(text: str) -> str:
         return errors.com_error(e)
 
 @mcp.tool()
-def hwp_create_table_with_data(rows: int, cols: int, data = None, has_header: bool = False) -> str:
-    """현재 커서 위치에 표를 생성하고 데이터를 채웁니다."""
-    try:
-        # HwpTableTools 인스턴스 가져오기
-        table_tools = get_hwp_table_tools()
-        if not table_tools:
-            return errors.from_message("Error: Failed to get table tools instance")
-        
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        # 커서가 이미 표 안에 있으면 표 속에 표를 만들거나 기존 표를 덮어쓰게 되므로 거부
-        if hwp.is_cursor_in_table():
-            return errors.err(errors.INVALID_ARG,
-                              "커서가 이미 표 안에 있어 새 표를 만들지 않았습니다. "
-                              "기존 표를 채우려면 hwp_fill_table_with_data를 쓰고, "
-                              "새 표는 커서를 표 밖으로 옮긴 뒤 다시 호출하세요.")
-
-        if not hwp.insert_table(rows, cols):
-            return errors.from_message(f"Error: 표를 넣지 못했습니다 - {hwp.last_error or '원인 불명'}")
-        
-        # 데이터가 있는 경우 표 채우기
-        if data is not None:
-            # 데이터 형식 로깅
-            logger.info(f"Create table with data type: {type(data)}, data: {str(data)[:100]}...")
-            
-            # 데이터가 이미 리스트 형태인 경우
-            if isinstance(data, list):
-                logger.info("Data is already a list, using directly")
-                processed_data = data
-            # 데이터가 문자열인 경우 JSON 파싱 시도
-            elif isinstance(data, str):
-                try:
-                    import json
-                    try:
-                        processed_data = json.loads(data)
-                        logger.info(f"Successfully parsed JSON data with {len(processed_data)} rows")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON 파싱 오류: {str(e)}")
-                        try:
-                            import ast
-                            processed_data = ast.literal_eval(data)
-                            logger.info(f"Successfully parsed data with literal_eval")
-                        except Exception as e2:
-                            logger.error(f"리터럴 평가 오류: {str(e2)}")
-                            return f"표는 생성되었으나 JSON 데이터 파싱 오류: {str(e)}"
-                except Exception as e:
-                    logger.error(f"데이터 파싱 오류: {str(e)}", exc_info=True)
-                    return f"표는 생성되었으나 데이터 파싱 오류: {str(e)}"
-            else:
-                return f"표는 생성되었으나 지원되지 않는 데이터 유형: {type(data)}"
-            
-            # 데이터 구조 유효성 검사
-            if not isinstance(processed_data, list):
-                return f"표는 생성되었으나 데이터가 리스트 형식이 아닙니다: {type(processed_data)}"
-            
-            if len(processed_data) == 0:
-                return "표는 생성되었으나 데이터 리스트가 비어 있습니다."
-            
-            # 모든 행이 리스트인지 확인 및 변환
-            for i, row in enumerate(processed_data):
-                if not isinstance(row, list):
-                    logger.warning(f"Row {i} is not a list, converting: {row}")
-                    processed_data[i] = [row]
-            
-            # 모든 데이터를 문자열로 변환
-            string_data = []
-            for row in processed_data:
-                string_row = [str(cell) if cell is not None else "" for cell in row]
-                string_data.append(string_row)
-            
-            # 표에 데이터 채우기
-            if table_tools.fill_table_with_data(string_data, 1, 1, has_header):
-                return f"표 생성 및 데이터 입력 완료 ({rows}x{cols})"
-            else:
-                return "표는 생성되었으나 데이터 입력에 실패했습니다."
-        
-        return f"표 생성 완료 ({rows}x{cols})"
-    except Exception as e:
-        logger.error(f"표 생성 중 오류: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-@track_edits
-def hwp_fill_table_with_data(data, start_row: int = 1, start_col: int = 1, has_header: bool = False, track: bool = None) -> str:
-    """
-    이미 존재하는 표에 데이터를 채웁니다.
-
-    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
-    """
-    try:
-        table_tools = get_hwp_table_tools()
-        if not table_tools:
-            return errors.from_message("Error: Failed to get table tools instance")
-        
-        # 데이터 형식 로깅
-        logger.info(f"Received data type: {type(data)}, data: {str(data)[:100]}...")
-        
-        # 데이터 처리
-        processed_data = []
-        
-        # 이미 리스트 형태인 경우
-        if isinstance(data, list):
-            logger.info("Data is already a list, processing directly")
-            processed_data = data
-        # 문자열인 경우 JSON 파싱 시도
-        elif isinstance(data, str):
-            try:
-                import json
-                
-                # JSON 파싱 시도
-                try:
-                    processed_data = json.loads(data)
-                    logger.info(f"Successfully parsed JSON data with {len(processed_data)} rows")
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON 디코딩 오류: {str(e)}")
-                    
-                    # 특수 케이스: 1부터 10까지 세로로 채우는 요청인 경우
-                    if "1부터 10까지" in data and "세로" in data:
-                        logger.info("특수 케이스 감지: 1부터 10까지 세로로 채우기")
-                        processed_data = []
-                        for i in range(1, 11):
-                            processed_data.append([str(i)])
-                    else:
-                        # 마지막 시도: 리터럴 평가
-                        try:
-                            import ast
-                            processed_data = ast.literal_eval(data)
-                            logger.info(f"Successfully parsed data with literal_eval: {len(processed_data)} rows")
-                        except Exception as e:
-                            logger.debug(f"literal_eval 파싱 실패: {e}")
-                            # 단순 문자열을 직접 파싱
-                            try:
-                                # 문자열에서 쉼표로 구분된 항목 추출 시도
-                                if "," in data:
-                                    items = [item.strip() for item in data.split(",")]
-                                    processed_data = [[item] for item in items]
-                                else:
-                                    # 단일 값인 경우
-                                    processed_data = [[data]]
-                            except Exception as parse_err:
-                                return errors.from_message(f"Error: Failed to parse string data - {str(parse_err)}")
-            except Exception as e:
-                logger.error(f"데이터 파싱 오류: {str(e)}", exc_info=True)
-                return errors.from_message(f"Error: Failed to parse data - {str(e)}")
-        else:
-            return errors.from_message(f"Error: Unsupported data type: {type(data)}")
-        
-        # 데이터 구조 유효성 검사
-        if not isinstance(processed_data, list):
-            logger.error(f"Processed data is not a list: {type(processed_data)}")
-            return errors.from_message(f"Error: Data must be a list, got {type(processed_data)}")
-        
-        if len(processed_data) == 0:
-            logger.error("Empty data list")
-            return errors.from_message("Error: Empty data list")
-        
-        # 모든 행이 리스트인지 확인 및 변환
-        for i, row in enumerate(processed_data):
-            if not isinstance(row, list):
-                logger.warning(f"Row {i} is not a list, converting to list: {row}")
-                processed_data[i] = [row]  # 리스트가 아닌 항목을 리스트로 변환
-        
-        # 모든 데이터를 문자열로 변환
-        final_data = []
-        for row in processed_data:
-            final_row = [str(cell) if cell is not None else "" for cell in row]
-            final_data.append(final_row)
-        
-        logger.info(f"Final processed data has {len(final_data)} rows")
-        
-        # 표에 데이터 채우기
-        result = table_tools.fill_table_with_data(final_data, start_row, start_col, has_header)
-        logger.info(f"Table filling result: {result}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"표 데이터 입력 중 오류: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_navigate(direction: str) -> str:
-    """표에서 지정된 방향으로 이동하고 현재 셀의 내용을 반환합니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, dir_used, cell_text = hwp.navigate_and_get_cell(direction)
-
-        if success:
-            return f"[{dir_used}] → 현재 셀: 「{cell_text}」"
-        else:
-            return errors.from_message(cell_text)
-
-    except Exception as e:
-        logger.error(f"네비게이션 오류: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-
-@mcp.tool()
-def hwp_find_and_show_cell(text: str) -> str:
-    """텍스트를 찾고 해당 셀의 내용을 반환합니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, cell_text = hwp.find_and_get_cell(text)
-
-        if success:
-            return f"'{text}' 찾음 → 현재 셀: 「{cell_text}」"
-        else:
-            return errors.from_message(cell_text)
-
-    except Exception as e:
-        logger.error(f"찾기 오류: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-
-@mcp.tool()
-def hwp_table_view(depth: int = 1) -> dict:
-    """
-    현재 위치 기준으로 주변 셀들의 내용을 가져옵니다. 반환 딕셔너리 구조는 workspace의 instructions.md 문서를 참조하세요.
-    """
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return {"error": errors.not_running()}
-
-        # depth 제한
-        depth = min(max(depth, 1), 5)
-
-        success, result = hwp.get_table_view(depth)
-
-        if success:
-            logger.info(f"테이블 뷰 가져오기 성공 (depth={depth})")
-            return result
-        else:
-            return result
-
-    except Exception as e:
-        logger.error(f"테이블 뷰 오류: {str(e)}", exc_info=True)
-        return {"error": errors.com_error(e)}
-
-
-@mcp.tool()
 @track_edits
 def hwp_fill_cells(
     path_value_map: dict,
@@ -964,52 +745,6 @@ def hwp_fill_cells(
         return errors.com_error(e)
 
 
-@mcp.tool()
-@track_edits
-def hwp_fill_column_numbers(start: int = 1, end: int = 10, column: int = 1, from_first_cell: bool = True, track: bool = None) -> str:
-    """
-    표의 특정 열에 시작 숫자부터 끝 숫자까지 세로로 채웁니다.
-
-    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
-    """
-    try:
-        # HWP 컨트롤러 가져오기
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-        
-        # 표 선택 (현재 커서 위치에 표가 있어야 함)
-        logger.info(f"테이블 열에 숫자 채우기: 열 {column}, {start}부터 {end}까지")
-        
-        # 표의 첫 번째 셀로 이동 (문서의 표 맨 앞)
-        hwp.hwp.Run("TableColBegin")
-        
-        # from_first_cell이 False인 경우에만 아래로 이동
-        if not from_first_cell:
-            hwp.hwp.Run("TableLowerCell")
-        
-        # 지정된 열로 이동
-        for _ in range(column - 1):
-            hwp.hwp.Run("TableRightCell")
-        
-        # 각 행에 숫자 채우기
-        for num in range(start, end + 1):
-            # 셀 선택 및 내용 지우기
-            hwp.hwp.Run("Select")
-            hwp.hwp.Run("Delete")
-            
-            # 셀에 숫자 입력
-            hwp.insert_text(str(num))
-            
-            # 다음 행으로 이동 (마지막 행이 아닌 경우)
-            if num < end:
-                hwp.hwp.Run("TableLowerCell")
-        
-        logger.info(f"테이블 열({column})에 숫자 {start}~{end} 입력 완료")
-        return f"테이블 열({column})에 숫자 {start}~{end} 입력 완료"
-        
-    except Exception as e:
-        logger.error(f"테이블 숫자 채우기 오류: {str(e)}", exc_info=True)
 @mcp.tool()
 def hwp_set_track_changes(active: bool) -> str:
     """변경 내용 추적(Track Changes) 모드를 켜거나 끕니다."""
@@ -1126,7 +861,7 @@ def hwp_scan_document(include_headings: bool = True) -> dict:
       page_numbering: 쪽 순번과 인쇄 쪽 번호의 대응. 예: [{"pages": "1-2", "printed": "1-2"}, {"pages": "3-20", "printed": "1-18"}]
         → 사용자가 말하는 "5쪽"은 보통 인쇄 번호. 이 표로 순번으로 바꿔 hwp_get_text(page=)·hwp_page_image(page=)에 넘길 것.
           같은 인쇄 번호가 여러 구간에 있으면(표지 1쪽, 본문 1쪽 등) 어느 쪽인지 사용자에게 확인.
-      table_count / tables: [{"index", "page"(순번), "printed_page"(인쇄 번호)}]  (최대 200개까지 상세. 표 내용은 hwp_table_view)
+      table_count / tables: [{"index", "page"(순번), "printed_page"(인쇄 번호)}]  (최대 200개까지 상세. 표 내용은 hwp_table_read)
       picture_count / pictures: [{"index", "page", "printed_page"}]
       other_controls: 그 밖의 개체 종류별 개수(CtrlID 기준)
       headings: 개요 문단 [{"level", "number", "text"}]  (include_headings=False면 생략, 표 안 문단 제외)

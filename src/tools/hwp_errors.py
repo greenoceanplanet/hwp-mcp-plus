@@ -26,7 +26,7 @@ NEXT_ACTIONS = {
     INVALID_ARG: "도구 설명의 인자 형식과 허용값을 확인해 고친 뒤 다시 호출하세요.",
     UNSAVED_DOCUMENT: "경로를 추측하지 말고, 사용자에게 저장할 위치를 물은 뒤 hwp_save(path=...)로 저장하세요.",
     FILE_NOT_FOUND: "경로를 추측하지 말고, 사용자에게 정확한 파일 경로를 확인하세요.",
-    NOT_IN_TABLE: "hwp_find_and_show_cell 등으로 커서를 표 안으로 옮기거나, 표 안 글자를 anchor로 지정하세요.",
+    NOT_IN_TABLE: "표 안 글자를 anchor로 지정하세요(표 내용은 hwp_table_read로 확인).",
     COM_ERROR: "같은 호출을 그대로 반복하지 마세요. hwp_get_context나 hwp_get_text로 문서 상태를 확인하고, 한글에 대화창이 떠 있는지 사용자에게 확인을 요청하세요.",
 }
 
