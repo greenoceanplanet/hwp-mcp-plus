@@ -13,12 +13,35 @@ import time
 import pythoncom
 from typing import Optional, List, Dict, Any, Tuple
 
+import functools
+
 try:
     from src.tools.hwp_tracking import track_scope
+    from src.tools.hwp_edit_helpers import restore_pos, save_pos
 except ImportError:  # src/tools를 sys.path에 직접 넣어 실행하는 경우
     from hwp_tracking import track_scope
+    from hwp_edit_helpers import restore_pos, save_pos
 
 logger = logging.getLogger("hwp-controller")
+
+
+def _keep_cursor(always: bool = False):
+    """
+    커서 위치를 저장해 두었다가, 메서드가 실패하면(또는 always=True면 항상) 원래 자리로 되돌립니다.
+    문서 처음부터 찾는 메서드가 못 찾았을 때 커서(화면)가 1쪽에 남지 않게 하려는 것.
+    실패 판정: 반환값이 False이거나, 튜플의 첫 값이 False.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            saved = save_pos(self.hwp) if self.is_hwp_running else None
+            result = fn(self, *args, **kwargs)
+            ok = result[0] if isinstance(result, tuple) else result
+            if saved and (always or not ok):
+                restore_pos(self.hwp, saved)
+            return result
+        return wrapper
+    return deco
 
 HWP_PROGID = "HWPFrame.HwpObject"
 
@@ -1050,6 +1073,7 @@ class HwpController:
         except Exception as e:
             return False, f"다시 실행 실패: {e}"
 
+    @_keep_cursor()
     def find_text(self, text: str) -> bool:
         """
         문서에서 텍스트를 찾습니다.
@@ -1396,6 +1420,7 @@ class HwpController:
             print(f"커서 문맥 가져오기 실패: {e}")
             return {"before": "", "after": ""}
 
+    @_keep_cursor()
     def fill_cell_next_to_label(
         self,
         label: str,
@@ -1725,6 +1750,7 @@ class HwpController:
         except Exception as e:
             return False, {"error": f"테이블 뷰 가져오기 실패: {str(e)}"}
 
+    @_keep_cursor(always=True)  # 읽기 전용: 셀 내용만 돌려주고 커서는 원래 자리로
     def find_and_get_cell(self, text: str) -> Tuple[bool, str]:
         """
         텍스트를 찾고 해당 셀의 내용을 반환합니다.
@@ -1808,6 +1834,7 @@ class HwpController:
         # 재귀: 다음 항목 처리
         return self._find_labels_recursive(path, depth + 1)
 
+    @_keep_cursor()
     def fill_cell_by_path(
         self,
         path: List[str],

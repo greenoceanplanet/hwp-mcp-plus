@@ -175,7 +175,8 @@ def test_delete_picture_uses_anchor_list_para():
     """실제 find_picture_near 경로: 캡션에서 CloseEx 후 GetPos의 (list, para)와 그림 anchor가 맞는 그림을 지움."""
     h = MagicMock()
     h.HAction.Execute.return_value = True
-    positions = iter([(5, 0, 3), (0, 7, 1)])  # 캡션 안 → CloseEx 후 본문
+    # 찾기 전 위치(save_pos) → 캡션 안 → CloseEx 후 본문
+    positions = iter([(0, 0, 0), (5, 0, 3), (0, 7, 1)])
     h.GetPos.side_effect = lambda: next(positions)
 
     def ctrl(cid, desc, pos, nxt):
@@ -266,3 +267,46 @@ def test_duplicate_occurrence_out_of_range():
     h, (ok, msg) = _dup(occurrence=3, text_reader=lambda: "남기업 남기업 ㅇ 자문위원")
     assert not ok and "2곳뿐" in msg
     h.HAction.Run.assert_not_called()
+
+
+# ---------------------------------------------------------------- 찾기 실패 시 커서 복원
+
+def _search_mock(found: bool):
+    h = MagicMock()
+    h.GetPos.return_value = (0, 42, 7)  # 사용자가 보던 위치
+    h.HAction.Execute.return_value = found
+    return h
+
+
+@pytest.mark.parametrize("find", [
+    lambda h: eh.find_anchor(h, "없는글자"),
+    lambda h: eh.find_nth(h, "없는글자", 2),
+])
+def test_failed_find_restores_cursor(find):
+    h = _search_mock(found=False)
+    assert find(h) is False
+    h.SetPos.assert_called_with(0, 42, 7)
+
+
+def test_successful_find_keeps_found_position():
+    h = _search_mock(found=True)
+    assert eh.find_anchor(h, "있는글자") is True
+    h.SetPos.assert_not_called()
+
+
+def test_controller_find_text_restores_on_failure():
+    c = HwpController()
+    c.hwp = _search_mock(found=False)
+    c.is_hwp_running = True
+    assert c.find_text("없는글자") is False
+    c.hwp.SetPos.assert_called_with(0, 42, 7)
+
+
+def test_find_and_get_cell_always_restores():
+    c = HwpController()
+    c.hwp = _search_mock(found=True)
+    c.is_hwp_running = True
+    c._get_cell_text_by_clipboard = lambda: "셀 내용"
+    ok, text = c.find_and_get_cell("성명")
+    assert ok and text == "셀 내용"
+    c.hwp.SetPos.assert_called_with(0, 42, 7)

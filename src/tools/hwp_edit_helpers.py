@@ -30,13 +30,37 @@ PARA_ITEMS = (
 BULLET_ITEMS = ("BulletChar", "HasCharShape", "HasImage", "Checked")
 
 
+def save_pos(h):
+    """현재 커서 위치(list, para, pos)를 돌려줍니다. 읽지 못하면 None."""
+    try:
+        return tuple(h.GetPos())[:3]
+    except Exception:
+        return None
+
+
+def restore_pos(h, pos) -> bool:
+    """선택을 풀고 커서를 pos로 되돌립니다. 찾기 실패 처리에 쓰도록 항상 False를 돌려줍니다.
+
+    문서 처음부터 찾다가 못 찾으면 커서(화면)가 1쪽에 남으므로, 원래 자리로 돌려놓습니다.
+    """
+    try:
+        h.HAction.Run("Cancel")
+        if pos:
+            h.SetPos(*pos)
+    except Exception:
+        pass
+    return False
+
+
 def find_anchor(h, anchor: str, keep_selection: bool = False) -> bool:
     """문서 처음부터 anchor를 찾아 커서를 옮깁니다. 비면 현재 위치를 그대로 씁니다.
 
     keep_selection=False면 선택을 풀고 커서를 찾은 글자 끝에 둡니다.
+    못 찾으면 커서를 원래 자리로 되돌리고 False.
     """
     if not anchor:
         return True
+    saved = save_pos(h)
     h.HAction.Run("MoveDocBegin")
     pset = h.HParameterSet.HFindReplace
     h.HAction.GetDefault("RepeatFind", pset.HSet)
@@ -45,7 +69,7 @@ def find_anchor(h, anchor: str, keep_selection: bool = False) -> bool:
     pset.IgnoreMessage = 1
     pset.Direction = 0
     if not h.HAction.Execute("RepeatFind", pset.HSet):
-        return False
+        return restore_pos(h, saved)
     if not keep_selection:
         h.HAction.Run("Cancel")
     return True
@@ -575,7 +599,9 @@ def _restore_clipboard_text(text):
 
 
 def find_nth(h, text: str, n: int = 1) -> bool:
-    """문서 처음부터 text의 n번째(1부터) 일치로 커서를 옮깁니다(선택 해제, 글자 끝). 없으면 False."""
+    """문서 처음부터 text의 n번째(1부터) 일치로 커서를 옮깁니다(선택 해제, 글자 끝).
+    없으면 커서를 원래 자리로 되돌리고 False."""
+    saved = save_pos(h)
     h.HAction.Run("Cancel")
     h.HAction.Run("MoveDocBegin")
     pset = h.HParameterSet.HFindReplace
@@ -587,11 +613,11 @@ def find_nth(h, text: str, n: int = 1) -> bool:
         pset.IgnoreMessage = 1
         pset.Direction = 0
         if not h.HAction.Execute("RepeatFind", pset.HSet):
-            return False
+            return restore_pos(h, saved)
         h.HAction.Run("Cancel")
         cur = tuple(h.GetPos())
         if last is not None and cur <= last:  # 문서 처음으로 되돌아감
-            return False
+            return restore_pos(h, saved)
         last = cur
     return True
 

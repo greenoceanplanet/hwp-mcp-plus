@@ -13,7 +13,7 @@ hwp_edit_helpers와 마찬가지로 한글 COM 객체(HWPFrame.HwpObject)를 직
 
 import logging
 
-from src.tools.hwp_edit_helpers import _insert_lines, _insert_plain, _is_picture
+from src.tools.hwp_edit_helpers import _insert_lines, _insert_plain, _is_picture, restore_pos, save_pos
 from src.tools.hwp_tracking import track_scope
 
 logger = logging.getLogger("hwp-mcp-extended")
@@ -87,16 +87,18 @@ def _find_next(h, text: str) -> bool:
 
 
 def _find_nth(h, text: str, n: int) -> bool:
-    """문서 처음부터 text의 n번째(1부터) 위치를 찾아 선택합니다. 문서 끝을 넘어 처음으로 돌아가면 실패."""
+    """문서 처음부터 text의 n번째(1부터) 위치를 찾아 선택합니다. 문서 끝을 넘어 처음으로 돌아가면 실패.
+    실패하면 커서를 원래 자리로 되돌립니다."""
+    saved = save_pos(h)
     h.HAction.Run("Cancel")
     h.HAction.Run("MoveDocBegin")
     last = None
     for _ in range(n):
         if not _find_next(h, text):
-            return False
+            return restore_pos(h, saved)
         cur = _pos_key(h)
         if last is not None and cur is not None and cur <= last:
-            return False  # 문서 처음으로 되돌아감
+            return restore_pos(h, saved)  # 문서 처음으로 되돌아감
         last = cur
     return True
 
@@ -170,6 +172,7 @@ def _patch_items(h, edits, text_reader, results):
 
             if replace_all:
                 limit = count if count else 1000
+                saved = save_pos(h)
                 h.HAction.Run("Cancel")
                 h.HAction.Run("MoveDocBegin")
                 done, last = 0, None
@@ -185,6 +188,7 @@ def _patch_items(h, edits, text_reader, results):
                 if done:
                     res.update(status="ok", message=f"{done}곳 바꿈")
                 else:
+                    restore_pos(h, saved)
                     res.update(status="not_found", message="찾지 못했습니다.")
                 continue
 
