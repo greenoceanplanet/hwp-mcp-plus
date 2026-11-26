@@ -113,7 +113,7 @@ Both anchors use the first match from the top of the document, so choose unique 
 
 ## 6. Reading text
 
-`hwp_get_text`, `hwp_get_selection`, `hwp_get_current_paragraph` and `hwp_get_context` read text with `GetTextFile("UNICODE", ...)`. (The `"TEXT"` format returns CP949 bytes packed into a string, which shows Korean as mojibake such as `ÁÖ°Å¾ÈÁ¤`.) Bullets/numbering added by paragraph shape appear as characters (e.g. `● `) at the start of the line in the output; soft line breaks (`BreakLine`) do not appear as line breaks.
+`hwp_get_text`, `hwp_get_selection` and `hwp_get_context` read text with `GetTextFile("UNICODE", ...)`. (The `"TEXT"` format returns CP949 bytes packed into a string, which shows Korean as mojibake such as `ÁÖ°Å¾ÈÁ¤`.) Bullets/numbering added by paragraph shape appear as characters (e.g. `● `) at the start of the line in the output; soft line breaks (`BreakLine`) do not appear as line breaks.
 
 `hwp_get_text(start_text="", max_chars=0)` can read just a section: `start_text` = start at its first occurrence (from the top), `max_chars` = cut after that many characters (0 = to the end). With both empty it returns the whole document as before. Example: `{"start_text": "3. 용산공원", "max_chars": 3000}`.
 

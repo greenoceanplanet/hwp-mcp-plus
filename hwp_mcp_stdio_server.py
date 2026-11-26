@@ -309,62 +309,24 @@ def hwp_save(path: str = None) -> str:
 @track_edits
 def hwp_insert_text(text: str, preserve_linebreaks: bool = True, track: bool = None) -> str:
     """
-    Insert text at the current cursor position.
-
+    현재 커서 위치에 글자를 넣습니다. 표 셀 안이면 그 셀의 커서 위치에 넣음.
+    선택(블록)이 있으면 선택한 글자를 지우고 그 자리에 넣습니다.
+    - text: 줄바꿈(\\n)은 문단 나눔. 새 문단만 만들려면 text="\\n".
+    - preserve_linebreaks: False면 줄바꿈을 공백으로 바꿔 한 문단으로 넣음.
+    찾은 글자를 기준으로 넣으려면 hwp_insert_at.
     track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
     """
     try:
         if not text:
             return errors.from_message("Error: Text is required")
-        
         hwp = get_hwp_controller()
         if not hwp:
             return errors.not_running()
-
-        # 현재 커서가 표 안에 있는지 확인
-        is_in_table = False
-        try:
-            hwp.hwp.Run("TableCellBlock")
-            hwp.hwp.Run("Cancel")
-            is_in_table = True
-        except Exception as e:
-            logger.debug(f"표 셀 확인 실패 (무시): {e}")
-            is_in_table = False
-
-        # 줄바꿈 문자 처리
-        if preserve_linebreaks and ('\n' in text or '\\n' in text):
-            # 이스케이프된 줄바꿈 문자(\n)와 실제 줄바꿈 문자 모두 처리
-            processed_text = text.replace('\\n', '\n')
-            lines = processed_text.split('\n')
-            
-            success = True
-            for i, line in enumerate(lines):
-                if not hwp.insert_text(line):
-                    success = False
-                    break
-                # 마지막 줄이 아니면 줄바꿈 삽입
-                if i < len(lines) - 1:
-                    hwp.insert_paragraph()
-            
-            if success:
-                logger.info("Successfully inserted text with line breaks")
-                return "Text with line breaks inserted successfully"
-            else:
-                return errors.from_message("Error: Failed to insert text with line breaks")
-        else:
-            if hwp.insert_text(text):
-                # 표 안이 아닐 경우에만 커서를 오른쪽으로 이동
-                if not is_in_table:
-                    # 현재 위치 저장
-                    current_pos = hwp.hwp.GetPos()
-                    if current_pos:
-                        # 텍스트 길이만큼 오른쪽으로 이동
-                        for _ in range(len(text)):
-                            hwp.hwp.Run("CharRight")
-                logger.info("Successfully inserted text")
-                return "Text inserted successfully"
-            else:
-                return errors.from_message("Error: Failed to insert text")
+        if not preserve_linebreaks:
+            text = " ".join(text.replace("\r\n", "\n").split("\n"))
+        if hwp.insert_text(text, preserve_linebreaks):
+            return "Text inserted successfully"
+        return errors.from_message("Error: Failed to insert text")
     except Exception as e:
         logger.error(f"Error inserting text: {str(e)}", exc_info=True)
         return errors.com_error(e)
@@ -475,23 +437,6 @@ def hwp_table_read(anchor: str = "", occurrence: int = 1, index: int = 0) -> dic
         return {"error": errors.com_error(e)}
 
 @mcp.tool()
-def hwp_insert_paragraph() -> str:
-    """Insert a new paragraph."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-        
-        if hwp.insert_paragraph():
-            logger.info("Successfully inserted paragraph")
-            return "Paragraph inserted successfully"
-        else:
-            return errors.from_message("Error: Failed to insert paragraph")
-    except Exception as e:
-        logger.error(f"Error inserting paragraph: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
 def hwp_get_text(start_text: str = "", max_chars: int = 0, page: int = 0) -> str:
     """
     현재 문서의 글자를 읽습니다. 인자를 비우면 문서 전체.
@@ -566,24 +511,6 @@ def hwp_replace_selection(text: str, preserve_linebreaks: bool = True, track: bo
         return msg if ok else errors.from_message(msg)
     except Exception as e:
         logger.error(f"Error replacing selection: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_get_current_paragraph() -> str:
-    """커서가 위치한 현재 문단의 전체 텍스트를 가져옵니다(커서 위치 보존)."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        text = hwp.get_current_paragraph_text()
-        if text:
-            logger.info("Successfully retrieved current paragraph")
-            return text
-        else:
-            return "현재 문단이 비어있거나 텍스트를 가져오지 못했습니다."
-    except Exception as e:
-        logger.error(f"Error getting current paragraph: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
 @mcp.tool()

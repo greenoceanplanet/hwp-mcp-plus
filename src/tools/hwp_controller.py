@@ -778,13 +778,14 @@ class HwpController:
             except Exception as e_del:
                 logger.warning(f"선택 영역 사전 삭제 실패: {e_del}")
 
+            text = text.replace("\r\n", "\n")
             if preserve_linebreaks and '\n' in text:
                 # 줄바꿈이 포함된 경우 줄 단위로 처리
                 lines = text.split('\n')
                 for i, line in enumerate(lines):
                     if i > 0:  # 첫 줄이 아니면 줄바꿈 추가
                         self.insert_paragraph()
-                    if line.strip():  # 빈 줄이 아니면 텍스트 삽입
+                    if line:  # 빈 줄이 아니면 텍스트 삽입(공백만 있는 줄도 그대로)
                         self._insert_text_direct(line)
                 return True
             else:
@@ -1347,36 +1348,6 @@ class HwpController:
             return self._get_text_file_safe("TEXT", "saveblock")
         except Exception as e:
             print(f"선택 텍스트 가져오기 실패: {e}")
-            return ""
-
-    def get_current_paragraph_text(self) -> str:
-        """
-        커서가 위치한 현재 문단의 전체 텍스트를 반환합니다.
-
-        커서 위치를 보존합니다(읽기만 하고 원위치로 복귀).
-
-        Returns:
-            str: 현재 문단 텍스트 (실패 시 "")
-        """
-        try:
-            if not self.is_hwp_running:
-                return ""
-
-            saved_pos = self.hwp.GetPos()
-
-            # 문단 시작으로 이동 후, 문단 끝까지 선택
-            self.hwp.Run("MoveParaBegin")
-            self.hwp.Run("MoveSelParaEnd")
-            text = self._get_text_file_safe("TEXT", "saveblock")
-
-            # 선택 해제 및 커서 원위치 복원
-            self.hwp.Run("Cancel")
-            if saved_pos:
-                self.hwp.SetPos(*saved_pos)
-
-            return text
-        except Exception as e:
-            print(f"현재 문단 텍스트 가져오기 실패: {e}")
             return ""
 
     def get_cursor_context(self) -> dict:
