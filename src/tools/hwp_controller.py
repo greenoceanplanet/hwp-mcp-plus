@@ -292,91 +292,6 @@ class HwpController:
             print(f"메시지 박스 모드 설정 실패: {e}")
             return False
 
-    def close_document(self, save: bool = False, suppress_dialog: bool = True) -> bool:
-        """
-        현재 문서를 닫습니다.
-
-        Args:
-            save (bool): 저장 후 닫을지 여부
-            suppress_dialog (bool): 저장 확인 대화상자 표시 안함 (기본값: True)
-
-        Returns:
-            bool: 닫기 성공 여부
-        """
-        try:
-            if not self.is_hwp_running:
-                return False
-
-            # 대화상자 표시 안함 설정
-            if suppress_dialog:
-                if save:
-                    # 저장하고 닫기: 확인 버튼 자동 클릭
-                    self.hwp.SetMessageBoxMode(0x00010000)
-                else:
-                    # 저장 안하고 닫기: 저장 안함 선택
-                    self.hwp.SetMessageBoxMode(0x00100000)
-
-            if save:
-                self.hwp.HAction.Run("FileSave")
-
-            result = self.hwp.HAction.Run("FileClose")
-            self.current_document_path = None
-
-            # 메시지 박스 모드 복원
-            if suppress_dialog:
-                self.hwp.SetMessageBoxMode(0x00000000)
-
-            return bool(result)
-        except Exception as e:
-            print(f"문서 닫기 실패: {e}")
-            # 메시지 박스 모드 복원 시도
-            try:
-                self.hwp.SetMessageBoxMode(0x00000000)
-            except Exception as e:
-                logger.debug(f"SetMessageBoxMode 복원 실패 (무시): {e}")
-            return False
-
-    def close_all_documents(self, save: bool = False, suppress_dialog: bool = True) -> bool:
-        """
-        모든 문서를 닫습니다.
-
-        Args:
-            save (bool): 저장 후 닫을지 여부
-            suppress_dialog (bool): 저장 확인 대화상자 표시 안함 (기본값: True)
-
-        Returns:
-            bool: 닫기 성공 여부
-        """
-        try:
-            if not self.is_hwp_running:
-                return False
-
-            # 대화상자 표시 안함 설정
-            if suppress_dialog:
-                if save:
-                    self.hwp.SetMessageBoxMode(0x00010000)
-                else:
-                    self.hwp.SetMessageBoxMode(0x00100000)
-
-            if save:
-                self.hwp.HAction.Run("FileSaveAll")
-
-            result = self.hwp.HAction.Run("FileCloseAll")
-            self.current_document_path = None
-
-            # 메시지 박스 모드 복원
-            if suppress_dialog:
-                self.hwp.SetMessageBoxMode(0x00000000)
-
-            return bool(result)
-        except Exception as e:
-            print(f"모든 문서 닫기 실패: {e}")
-            try:
-                self.hwp.SetMessageBoxMode(0x00000000)
-            except Exception as e:
-                logger.debug(f"SetMessageBoxMode 복원 실패 (무시): {e}")
-            return False
-
     def create_new_document(self) -> bool:
         """
         새 문서를 생성합니다.
@@ -397,55 +312,42 @@ class HwpController:
 
     def get_open_documents(self) -> Tuple[bool, List[Dict[str, Any]]]:
         """
-        열려있는 문서 목록을 반환합니다.
+        이 한글 창에 열린 문서(탭) 목록. 탭을 전환하지 않고 읽음.
 
         Returns:
-            Tuple[bool, List[Dict]]: (성공 여부, 문서 목록)
-            각 문서는 {"index": int, "path": str, "is_current": bool} 형태
+            (성공 여부, [{"index", "id", "name", "path", "pages", "modified", "is_current"}])
+            path: 저장된 파일의 전체 경로(새 문서면 ""). FullName을 씀
+                  (Path에는 폴더만 들어 있어 예전에는 저장된 문서도 '저장 안 된 문서'로 보였음).
         """
         try:
             if not self.is_hwp_running:
                 return False, []
-
-            documents = []
             docs = self.hwp.XHwpDocuments
-
-            # 활성 문서는 DocumentID로 비교(CurDocIndex는 늦은 바인딩에서 읽히지 않아
-            # 예전에는 항상 0번을 활성으로 표시했음)
+            # 활성 문서는 DocumentID로 비교(CurDocIndex는 늦은 바인딩에서 읽히지 않음)
             active_id = None
             try:
                 active_id = docs.Active_XHwpDocument.DocumentID
             except Exception as e:
                 logger.debug(f"활성 문서 조회 실패 (무시): {e}")
 
+            documents = []
             for i in range(docs.Count):
+                doc = docs.Item(i)
+                rec = {"index": i, "id": None, "name": "", "path": "", "pages": None,
+                       "modified": None, "is_current": False}
                 try:
-                    doc = docs.Item(i)
-                    try:
-                        doc_path = doc.Path or ""
-                    except Exception as e:
-                        logger.debug(f"문서 경로 조회 실패: {e}")
-                        doc_path = ""
-                    # 저장 안 된 문서는 Path가 비거나 폴더만 들어 있음(실측)
-                    if not doc_path or doc_path.endswith(("\\", "/")):
-                        doc_path = "(저장 안 된 문서)"
-
-                    is_current = active_id is not None and doc.DocumentID == active_id
-                    documents.append({
-                        "index": i,
-                        "path": doc_path,
-                        "is_current": is_current
-                    })
+                    rec["id"] = doc.DocumentID
+                    rec["is_current"] = active_id is not None and rec["id"] == active_id
+                    rec["path"] = doc.FullName or ""
+                    rec["name"] = os.path.basename(rec["path"]) if rec["path"] else "(저장 안 된 새 문서)"
+                    rec["modified"] = bool(doc.Modified)
+                    rec["pages"] = int(doc.XHwpDocumentInfo.PageCount)
                 except Exception as e:
-                    documents.append({
-                        "index": i,
-                        "path": f"(오류: {e})",
-                        "is_current": False
-                    })
-
+                    logger.debug(f"문서 정보 조회 실패({i}): {e}")
+                documents.append(rec)
             return True, documents
         except Exception as e:
-            print(f"문서 목록 조회 실패: {e}")
+            logger.error(f"문서 목록 조회 실패: {e}")
             return False, []
 
     def switch_document(self, index: int) -> Tuple[bool, str]:
@@ -495,12 +397,13 @@ class HwpController:
         """
         try:
             instances = []
-            current_hwnd = None
-
-            # 현재 연결된 HWP의 윈도우 핸들
+            # 지금 연결된 한글이 가진 창 전부(한 프로그램이 창을 여러 개 띄울 수 있음.
+            # 예전에는 첫 창만 '현재'로 봐서 같은 프로그램의 다른 창을 '다른 한글 창'으로 보였음)
+            current_hwnds = set()
             if self.hwp:
                 try:
-                    current_hwnd = self.hwp.XHwpWindows.Item(0).WindowHandle
+                    wins = self.hwp.XHwpWindows
+                    current_hwnds = {wins.Item(i).WindowHandle for i in range(wins.Count)}
                 except Exception as e:
                     logger.debug(f"현재 WindowHandle 조회 실패 (무시): {e}")
 
@@ -512,7 +415,7 @@ class HwpController:
                     "index": i,
                     "hwnd": win["hwnd"],
                     "title": win["title"],
-                    "is_current": win["hwnd"] == current_hwnd if current_hwnd else False
+                    "is_current": win["hwnd"] in current_hwnds
                 })
 
             return True, instances
@@ -615,24 +518,6 @@ class HwpController:
 
         except Exception as e:
             return False, f"연결 실패: {e}"
-
-    def close_hwp_window(self, hwnd: int) -> Tuple[bool, str]:
-        """
-        HWP 윈도우를 닫습니다 (WM_CLOSE 메시지 전송).
-
-        Args:
-            hwnd: 윈도우 핸들
-
-        Returns:
-            Tuple[bool, str]: (성공 여부, 메시지)
-        """
-        try:
-            title = win32gui.GetWindowText(hwnd)
-            WM_CLOSE = 0x0010
-            win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
-            return True, f"창 닫기 요청: {title}"
-        except Exception as e:
-            return False, f"창 닫기 실패: {e}"
 
     def open_document(self, file_path: str) -> bool:
         """

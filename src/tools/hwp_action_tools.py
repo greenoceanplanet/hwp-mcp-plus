@@ -34,7 +34,7 @@ def blocked_reason(name: str):
     """실행을 막을 이유(없으면 None)."""
     if name.startswith(BLOCKED_PREFIXES):
         return ("파일·인쇄·창·매크로·스크립트 계열 액션은 막혀 있습니다. "
-                "열기/저장/닫기는 hwp_open·hwp_save·hwp_close_document를 쓰세요.")
+                "열기·저장은 hwp_open·hwp_save를 쓰세요. 문서 닫기는 사용자가 직접 합니다.")
     if any(m in name for m in DIALOG_MARKERS):
         return "대화창을 여는 액션은 한글이 대화창에서 멈추므로 막혀 있습니다. 매개변수(params)로 직접 지정하세요."
     return None

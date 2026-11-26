@@ -159,106 +159,76 @@ def hwp_create() -> str:
 
 @mcp.tool()
 def hwp_list_tabs() -> str:
-    """현재 HWP 창에서 열려있는 탭(문서) 목록을 반환합니다."""
+    """
+    열린 문서(탭) 목록: 번호, 파일 이름, 쪽 수, 저장 안 한 변경 여부. →가 지금 편집 대상(활성) 문서.
+    한글 창이 여러 개면 다른 창(hwnd)도 함께 보여 줌. 문서를 고치기 전에 활성 문서가 맞는지 확인할 것.
+    """
     try:
         hwp = get_hwp_controller()
         if not hwp:
             return errors.not_running()
-
         success, documents = hwp.get_open_documents()
         if not success:
             return errors.from_message("Error: Failed to get document list")
-
         if not documents:
             return "열려있는 문서가 없습니다."
-
-        result = f"열려있는 문서 ({len(documents)}개):\n"
-        for doc in documents:
-            marker = "→ " if doc["is_current"] else "  "
-            result += f"{marker}[{doc['index']}] {doc['path']}\n"
-
-        return result
+        lines = [f"열려있는 문서 ({len(documents)}개):"]
+        for d in documents:
+            marker = "→ " if d["is_current"] else "  "
+            info = []
+            if d["pages"] is not None:
+                info.append(f"{d['pages']}쪽")
+            if d["modified"]:
+                info.append("저장 안 한 변경 있음")
+            lines.append(f"{marker}[{d['index']}] {d['name']}" + (f" ({', '.join(info)})" if info else "")
+                         + (f"\n      {d['path']}" if d["path"] else ""))
+        ok, windows = hwp.get_all_hwp_instances()
+        others = [w for w in windows if not w["is_current"]] if ok else []
+        if others:
+            lines.append("다른 한글 창(hwp_switch_tab(hwnd=...)로 전환):")
+            lines += [f"  hwnd={w['hwnd']} {w['title']}" for w in others]
+        return "\n".join(lines)
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
+
 @mcp.tool()
-def hwp_switch_tab(index: int) -> str:
-    """현재 HWP 창에서 특정 인덱스의 탭으로 전환합니다."""
+def hwp_switch_tab(index: int = None, hwnd: int = None) -> str:
+    """
+    편집 대상(활성) 문서를 바꿉니다.
+    - index: 이 한글 창의 탭 번호(hwp_list_tabs의 [번호]).
+    - hwnd: 다른 한글 창으로 옮겨 붙을 때 그 창 번호(hwp_list_tabs의 '다른 한글 창').
+    사용자가 한글에서 다른 문서를 보고 있을 수 있으니, 사용자 문서가 아닌 탭으로 바꿀 때는 먼저 알릴 것.
+    """
     try:
         hwp = get_hwp_controller()
         if not hwp:
             return errors.not_running()
-
-        success, message = hwp.switch_document(index)
-        if success:
-            logger.info(message)
-            return message
+        if hwnd is not None:
+            success, message = hwp.connect_to_hwp_instance(hwnd)
+        elif index is not None:
+            success, message = hwp.switch_document(index)
         else:
-            return errors.from_message(message)
+            return errors.err(errors.INVALID_ARG, "index(탭 번호)나 hwnd(다른 한글 창) 중 하나가 필요합니다.",
+                              "hwp_list_tabs로 번호를 확인하세요.")
+        return message if success else errors.from_message(message)
     except Exception as e:
         logger.error(f"Error switching document: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
+
 @mcp.tool()
-def hwp_list_windows() -> str:
-    """실행 중인 모든 HWP 창(인스턴스) 목록을 반환합니다."""
+def hwp_undo(count: int = 1, redo: bool = False) -> str:
+    """활성 문서에서 직전 작업을 count번 되돌립니다. redo=True면 되돌린 작업을 다시 실행."""
     try:
         hwp = get_hwp_controller()
         if not hwp:
             return errors.not_running()
-
-        success, instances = hwp.get_all_hwp_instances()
-        if not success:
-            return errors.from_message("Error: Failed to get HWP instances")
-
-        if not instances:
-            return "실행 중인 HWP 인스턴스가 없습니다."
-
-        result = f"HWP 인스턴스 ({len(instances)}개):\n"
-        for inst in instances:
-            marker = "→ " if inst["is_current"] else "  "
-            result += f"{marker}[{inst['index']}] {inst['title']} (hwnd: {inst['hwnd']})\n"
-
-        return result
+        success, message = (hwp.redo if redo else hwp.undo)(count)
+        return message if success else errors.from_message(message)
     except Exception as e:
-        logger.error(f"Error listing HWP instances: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_switch_window(hwnd: int) -> str:
-    """지정된 윈도우 핸들(hwnd)의 HWP 창으로 전환합니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, message = hwp.connect_to_hwp_instance(hwnd)
-        if success:
-            logger.info(message)
-            return message
-        else:
-            return errors.from_message(message)
-    except Exception as e:
-        logger.error(f"Error connecting to HWP instance: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_close_window(hwnd: int) -> str:
-    """지정된 HWP 창을 닫습니다(저장 안 함)."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, message = hwp.close_hwp_window(hwnd)
-        if success:
-            logger.info(message)
-            return message
-        else:
-            return errors.from_message(message)
-    except Exception as e:
-        logger.error(f"Error closing HWP window: {str(e)}", exc_info=True)
+        logger.error(f"Error in undo/redo: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
 @mcp.tool()
@@ -541,76 +511,6 @@ def hwp_get_context() -> dict:
     except Exception as e:
         logger.error(f"Error getting context: {str(e)}", exc_info=True)
         return {"error": errors.com_error(e)}
-
-@mcp.tool()
-def hwp_close_document(save: bool = False, suppress_dialog: bool = True) -> str:
-    """현재 활성화된 문서를 닫습니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        if hwp.close_document(save, suppress_dialog):
-            logger.info(f"Successfully closed document (save={save}, suppress_dialog={suppress_dialog})")
-            return "Document closed successfully"
-        else:
-            return errors.from_message("Error: Failed to close document")
-    except Exception as e:
-        logger.error(f"Error closing document: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_close_all_documents(save: bool = False, suppress_dialog: bool = True) -> str:
-    """열려 있는 모든 HWP 문서를 닫습니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        if hwp.close_all_documents(save, suppress_dialog):
-            logger.info(f"Successfully closed all documents (save={save}, suppress_dialog={suppress_dialog})")
-            return "All documents closed successfully"
-        else:
-            return errors.from_message("Error: Failed to close all documents")
-    except Exception as e:
-        logger.error(f"Error closing all documents: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_undo(count: int = 1) -> str:
-    """직전 작업을 지정한 횟수만큼 실행 취소(Undo)합니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, message = hwp.undo(count)
-        if success:
-            logger.info(message)
-            return message
-        else:
-            return errors.from_message(message)
-    except Exception as e:
-        logger.error(f"Error in undo: {str(e)}", exc_info=True)
-        return errors.com_error(e)
-
-@mcp.tool()
-def hwp_redo(count: int = 1) -> str:
-    """실행 취소한 작업을 지정한 횟수만큼 다시 실행(Redo)합니다."""
-    try:
-        hwp = get_hwp_controller()
-        if not hwp:
-            return errors.not_running()
-
-        success, message = hwp.redo(count)
-        if success:
-            logger.info(message)
-            return message
-        else:
-            return errors.from_message(message)
-    except Exception as e:
-        logger.error(f"Error in redo: {str(e)}", exc_info=True)
-        return errors.com_error(e)
 
 @mcp.tool()
 def hwp_find_text(text: str) -> str:
