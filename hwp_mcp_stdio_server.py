@@ -704,22 +704,19 @@ def hwp_create_table_with_data(rows: int, cols: int, data = None, has_header: bo
         if not table_tools:
             return errors.from_message("Error: Failed to get table tools instance")
         
-        # 현재 커서가 표 안에 있는지 확인
         hwp = get_hwp_controller()
-        is_in_table = False
-        try:
-            hwp.hwp.Run("TableCellBlock")
-            hwp.hwp.Run("Cancel")
-            is_in_table = True
-        except Exception as e:
-            logger.debug(f"표 셀 확인 실패 (무시): {e}")
-            is_in_table = False
+        if not hwp:
+            return errors.not_running()
 
-        # 표 안에 있지 않은 경우에만 새 표 생성
-        if not is_in_table:
-            # 표 생성
-            if not table_tools.insert_table(rows, cols):
-                return errors.from_message("Error: Failed to create table")
+        # 커서가 이미 표 안에 있으면 표 속에 표를 만들거나 기존 표를 덮어쓰게 되므로 거부
+        if hwp.is_cursor_in_table():
+            return errors.err(errors.INVALID_ARG,
+                              "커서가 이미 표 안에 있어 새 표를 만들지 않았습니다. "
+                              "기존 표를 채우려면 hwp_fill_table_with_data를 쓰고, "
+                              "새 표는 커서를 표 밖으로 옮긴 뒤 다시 호출하세요.")
+
+        if not hwp.insert_table(rows, cols):
+            return errors.from_message(f"Error: 표를 넣지 못했습니다 - {hwp.last_error or '원인 불명'}")
         
         # 데이터가 있는 경우 표 채우기
         if data is not None:
@@ -2018,6 +2015,38 @@ def hwp_insert_at(anchor: str = "", text: str = "", position: str = "para_after"
 
 @mcp.tool()
 @track_edits
+def hwp_duplicate(unit: str, anchor: str, target: str, position: str = "para_after", end_anchor: str = "",
+                  occurrence: int = 0, target_occurrence: int = 0, track: bool = None) -> str:
+    """
+    표 하나 또는 문단 범위를 서식 그대로 복사해 다른 문단 앞/뒤에 붙여넣습니다.
+    기존 표와 같은 양식의 표를 하나 더 만들 때 씁니다(복사 후 hwp_table_delete로 줄 수를 맞추고 hwp_fill_table_grid로 내용 교체).
+    - unit:
+        "table"       anchor 글자가 든 표 전체(선 모양·배경색·열 너비 등 그대로)
+        "paragraphs"  anchor 문단부터 end_anchor 문단까지 통째로(사이의 표·그림 포함). 본문 문단만.
+    - anchor: 복사할 대상 안의 글자. 예: 표 안의 "남기업"
+    - end_anchor: unit="paragraphs"일 때 끝 문단 안의 글자(anchor 문단 이후 처음 나오는 곳). 비우면 anchor 문단 하나.
+    - target: 붙여넣을 기준 문단 안의 글자. 예: "ㅇ 자문위원"
+    - position: "para_after"(target 문단 뒤, 기본) / "para_before"(target 문단 앞)
+    - occurrence / target_occurrence: anchor / target이 여러 곳에 있을 때 문서 처음부터 몇 번째(1부터)인지.
+    anchor·target이 여러 곳에 있는데 occurrence를 주지 않으면 복사하지 않고 AMBIGUOUS 오류.
+    (본문·별첨에 같은 표가 있으면 표 안 글자가 모두 겹치므로 occurrence로 지정)
+    클립보드를 거치며, 끝나면 작업 전 클립보드의 글자를 되돌려 놓음(글자 외 형식은 복원 안 됨).
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.duplicate(hwp.hwp, unit, anchor, target, position, end_anchor,
+                                             text_reader=hwp.get_text, occurrence=occurrence,
+                                             target_occurrence=target_occurrence)
+        return msg if ok else errors.from_message(msg)
+    except Exception as e:
+        logger.error(f"Error duplicating: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+@mcp.tool()
+@track_edits
 def hwp_copy_format(from_anchor: str, to_anchor: str, char: bool = True, para: bool = True, track: bool = None) -> str:
     """
     한 문단의 서식을 다른 문단 전체에 복사합니다.
@@ -2230,7 +2259,8 @@ def hwp_page_image(page: int = 0, resolution: int = 96, save_path: str = None) -
         logger.error(f"Error creating page image: {str(e)}", exc_info=True)
         return [errors.com_error(e)]
 
-if __name__ == "__main__":
+def main():
+    """`hwp-mcp-plus` 명령의 진입점 (pyproject.toml [project.scripts])."""
     logger.info("Starting HWP MCP stdio server")
     try:
         # Run the FastMCP server with stdio transport
@@ -2238,4 +2268,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error running server: {str(e)}", exc_info=True)
         print(f"Error: {str(e)}", file=sys.stderr)
-        sys.exit(1) 
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main() 

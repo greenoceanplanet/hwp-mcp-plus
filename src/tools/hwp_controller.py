@@ -55,6 +55,7 @@ class HwpController:
         self.visible = True
         self.is_hwp_running = False
         self.current_document_path = None
+        self.last_error = ""
 
     # 노티/헬퍼 창 제목 (실제 문서 창이 아님)
     _HWP_NONDOC_TITLES = {"SystemResourceNotifyWindow", "MediaContextNotificationWindow"}
@@ -925,6 +926,26 @@ class HwpController:
             logger.debug(f"SetPos 실패: {e}")
             return False
 
+    def is_cursor_in_table(self) -> bool:
+        """커서가 표 셀 안에 있는지 확인합니다(커서 위치 보존)."""
+        try:
+            pos = self.hwp.GetPos()
+            if pos[0] == 0:  # 본문 목록이면 표 밖
+                return False
+            try:
+                ctrl = self.hwp.ParentCtrl
+                if ctrl is not None:
+                    return ctrl.CtrlID == "tbl"
+            except Exception:
+                pass
+            # ParentCtrl을 못 쓰면 표 안에서만 성공하는 동작으로 판별하고 커서를 되돌림
+            in_table = bool(self.hwp.HAction.Run("TableColBegin"))
+            self.hwp.SetPos(*pos)
+            return in_table
+        except Exception as e:
+            logger.debug(f"표 안 여부 확인 실패: {e}")
+            return False
+
     def insert_table(self, rows: int, cols: int) -> bool:
         """
         현재 커서 위치에 표를 삽입합니다.
@@ -936,29 +957,35 @@ class HwpController:
         Returns:
             bool: 삽입 성공 여부
         """
+        self.last_error = ""
+        step = "준비"
         try:
             if not self.is_hwp_running:
+                self.last_error = "한글에 연결되어 있지 않습니다."
                 return False
-            
-            self.hwp.HAction.GetDefault("TableCreate", self.hwp.HParameterSet.HTableCreation.HSet)
-            self.hwp.HParameterSet.HTableCreation.Rows = rows
-            self.hwp.HParameterSet.HTableCreation.Cols = cols
-            self.hwp.HParameterSet.HTableCreation.WidthType = 0  # 0: 단에 맞춤, 1: 절대값
-            self.hwp.HParameterSet.HTableCreation.HeightType = 1  # 0: 자동, 1: 절대값
-            self.hwp.HParameterSet.HTableCreation.WidthValue = 0  # 단에 맞춤이므로 무시됨
-            self.hwp.HParameterSet.HTableCreation.HeightValue = 1000  # 셀 높이(hwpunit)
-            
-            # 각 열의 너비를 설정 (모두 동일하게)
-            # PageWidth 대신 고정 값 사용
-            col_width = 8000 // cols  # 전체 너비를 열 수로 나눔
-            self.hwp.HParameterSet.HTableCreation.CreateItemArray("ColWidth", cols)
-            for i in range(cols):
-                self.hwp.HParameterSet.HTableCreation.ColWidth.SetItem(i, col_width)
-                
-            self.hwp.HAction.Execute("TableCreate", self.hwp.HParameterSet.HTableCreation.HSet)
+            if rows < 1 or cols < 1:
+                self.last_error = f"행·열 수는 1 이상이어야 합니다(요청: {rows}x{cols})."
+                return False
+
+            # 열 너비는 지정하지 않음: 단에 맞춤(WidthType=0)이면 한글이 열을 고르게 나눔
+            step = "기본값 읽기"
+            pset = self.hwp.HParameterSet.HTableCreation
+            self.hwp.HAction.GetDefault("TableCreate", pset.HSet)
+            step = "속성 설정"
+            pset.Rows = rows
+            pset.Cols = cols
+            pset.WidthType = 0  # 0: 단에 맞춤
+            pset.HeightType = 0  # 0: 자동
+            step = "실행"
+            ok = self.hwp.HAction.Execute("TableCreate", pset.HSet)
+            if not ok:
+                self.last_error = ("한글이 표 만들기를 거부했습니다. 커서가 머리말·각주·글상자 안이거나 "
+                                   "한글에 대화창이 떠 있는지 확인하세요.")
+                return False
             return True
         except Exception as e:
-            print(f"표 삽입 실패: {e}")
+            self.last_error = f"{step} 단계에서 오류: {e}"
+            logger.error(f"표 삽입 실패({step}): {e}", exc_info=True)
             return False
 
     def undo(self, count: int = 1) -> Tuple[bool, str]:
@@ -1915,6 +1942,27 @@ class HwpController:
             logger.debug(f"현재 쪽 번호 확인 실패: {e}")
             return 1
 
+    def _create_page_image_raw(self, path: str, page_index: int, resolution: int, fmt: str) -> bool:
+        """
+        CreatePageImage를 호출합니다. 커서가 표·글상자 등 본문 밖 목록에 있으면 한글이 실패하므로,
+        그때는 커서를 잠시 본문 처음으로 옮겨 다시 시도하고 원래 위치로 되돌립니다.
+        """
+        def _try() -> bool:
+            ok = self.hwp.CreatePageImage(path, page_index, resolution, 24, fmt)
+            return bool(ok) and os.path.exists(path)
+
+        if _try():
+            return True
+        pos = self.hwp.GetPos()
+        if pos[0] == 0:
+            return False
+        try:
+            self.hwp.HAction.Run("Cancel")
+            self.hwp.SetPos(0, 0, 0)
+            return _try()
+        finally:
+            self.hwp.SetPos(*pos)
+
     def create_page_image(self, out_path: str, page: int, resolution: int = 96) -> Tuple[bool, str]:
         """
         한글이 그린 모습 그대로 한 쪽을 이미지 파일로 저장합니다.
@@ -1938,16 +1986,16 @@ class HwpController:
 
             # 한글의 CreatePageImage는 bmp/gif만 지원(쪽 번호는 0부터)
             if ext in ("bmp", "gif"):
-                ok = self.hwp.CreatePageImage(out_path, page - 1, resolution, 24, ext)
-                if not ok or not os.path.exists(out_path):
+                ok = self._create_page_image_raw(out_path, page - 1, resolution, ext)
+                if not ok:
                     return False, f"한글이 쪽 이미지를 만들지 못했습니다(저장 시도 경로: {out_path})."
                 return True, out_path
 
             from PIL import Image as PILImage
             tmp_bmp = os.path.splitext(out_path)[0] + ".__tmp__.bmp"
             try:
-                ok = self.hwp.CreatePageImage(tmp_bmp, page - 1, resolution, 24, "bmp")
-                if not ok or not os.path.exists(tmp_bmp):
+                ok = self._create_page_image_raw(tmp_bmp, page - 1, resolution, "bmp")
+                if not ok:
                     return False, f"한글이 쪽 이미지를 만들지 못했습니다(저장 시도 경로: {tmp_bmp})."
                 with PILImage.open(tmp_bmp) as img:
                     img.convert("RGB").save(out_path, format="JPEG" if ext in ("jpg", "jpeg") else "PNG")

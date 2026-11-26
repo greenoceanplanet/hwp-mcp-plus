@@ -536,3 +536,197 @@ def fill_table_grid(h, anchor: str, rows, skip_empty: bool = True):
             _fill_current_cell(h, v if isinstance(v, str) else str(v))
             written += 1
     return True, f"표 셀 {written}칸을 채웠습니다.{stopped}"
+
+
+# ---------------------------------------------------------------- 표·문단 복제
+
+DUPLICATE_UNITS = ("table", "paragraphs")
+DUPLICATE_POSITIONS = ("para_after", "para_before")
+
+
+def _clipboard_text():
+    """클립보드의 글자(CF_UNICODETEXT)를 읽습니다. 없거나 실패하면 None."""
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
+                return win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+            return None
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        return None
+
+
+def _restore_clipboard_text(text):
+    """작업 전에 읽어 둔 글자를 클립보드에 되돌려 놓습니다(글자 외 형식은 복원하지 않음)."""
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            if text is not None:
+                win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        pass
+
+
+def find_nth(h, text: str, n: int = 1) -> bool:
+    """문서 처음부터 text의 n번째(1부터) 일치로 커서를 옮깁니다(선택 해제, 글자 끝). 없으면 False."""
+    h.HAction.Run("Cancel")
+    h.HAction.Run("MoveDocBegin")
+    pset = h.HParameterSet.HFindReplace
+    last = None
+    for _ in range(max(1, n)):
+        h.HAction.GetDefault("RepeatFind", pset.HSet)
+        pset.FindString = text
+        pset.FindRegExp = 0
+        pset.IgnoreMessage = 1
+        pset.Direction = 0
+        if not h.HAction.Execute("RepeatFind", pset.HSet):
+            return False
+        h.HAction.Run("Cancel")
+        cur = tuple(h.GetPos())
+        if last is not None and cur <= last:  # 문서 처음으로 되돌아감
+            return False
+        last = cur
+    return True
+
+
+def _count_in_text(text_reader, s: str):
+    if not s or text_reader is None:
+        return None
+    try:
+        return (text_reader() or "").count(s)
+    except Exception:
+        return None
+
+
+def _select_table_at_anchor(h, anchor: str, occurrence: int = 1):
+    """anchor가 든 표 전체를 개체로 선택합니다. (성공여부, 메시지)"""
+    if not find_nth(h, anchor, occurrence):
+        return False, f"복사할 글자를 찾지 못했습니다: {anchor}"
+    if h.GetPos()[0] == 0:
+        return False, f"'{anchor}'가 표 안에 있지 않습니다."
+    try:
+        ctrl = h.ParentCtrl
+    except Exception:
+        ctrl = None
+    if ctrl is None or getattr(ctrl, "CtrlID", "") != "tbl":
+        return False, f"'{anchor}'가 든 표를 찾지 못했습니다(표 안 글자가 아니거나 글상자 안일 수 있음)."
+    h.HAction.Run("Cancel")
+    h.SetPosBySet(ctrl.GetAnchorPos(0))
+    if not h.FindCtrl():
+        return False, "표를 선택하지 못했습니다."
+    return True, "표"
+
+
+def _select_paragraphs(h, anchor: str, end_anchor: str, occurrence: int = 1):
+    """anchor 문단부터 end_anchor 문단까지(뒤 문단 나눔 포함)를 선택합니다. (성공여부, 메시지)
+
+    end_anchor는 anchor 문단 이후에서 처음 나오는 곳.
+    """
+    if not find_nth(h, anchor, occurrence):
+        return False, f"복사할 글자를 찾지 못했습니다: {anchor}"
+    h.HAction.Run("MoveParaBegin")
+    s_list, s_para, _ = h.GetPos()
+    if s_list != 0:
+        return False, f"'{anchor}'가 본문이 아닌 곳(표·글상자 등)에 있습니다. 문단 복사는 본문에서만 됩니다."
+    e_para = s_para
+    if end_anchor:
+        # anchor 문단 처음부터 앞으로 찾기
+        h.SetPos(0, s_para, 0)
+        pset = h.HParameterSet.HFindReplace
+        h.HAction.GetDefault("RepeatFind", pset.HSet)
+        pset.FindString = end_anchor
+        pset.FindRegExp = 0
+        pset.IgnoreMessage = 1
+        pset.Direction = 0
+        if not h.HAction.Execute("RepeatFind", pset.HSet):
+            return False, f"끝 문단 글자를 찾지 못했습니다: {end_anchor}"
+        h.HAction.Run("Cancel")
+        e_list, e_para, _ = h.GetPos()
+        if e_list != 0:
+            return False, f"'{end_anchor}'가 본문이 아닌 곳(표·글상자 등)에 있습니다."
+        if e_para < s_para:
+            return False, f"끝 문단('{end_anchor}')이 시작 문단('{anchor}')보다 앞에 있습니다."
+    # 끝 문단 다음 문단의 처음까지 선택해 문단 나눔까지 포함
+    h.SetPos(0, e_para, 0)
+    h.HAction.Run("MoveParaEnd")
+    end_pos = h.GetPos()
+    if h.HAction.Run("MoveNextParaBegin") and h.GetPos()[1] > e_para:
+        end_pos = h.GetPos()
+    if not h.SelectText(s_para, 0, end_pos[1], end_pos[2]):
+        return False, "문단을 선택하지 못했습니다."
+    return True, f"문단 {e_para - s_para + 1}개"
+
+
+def duplicate(h, unit: str, anchor: str, target: str, position: str = "para_after",
+              end_anchor: str = "", text_reader=None, occurrence: int = 0, target_occurrence: int = 0):
+    """표 하나 또는 문단 범위를 서식 그대로 복사해 target 문단 앞/뒤에 붙여넣습니다. (성공여부, 메시지)
+
+    - unit="table": anchor가 든 표 전체.
+    - unit="paragraphs": anchor 문단부터 end_anchor 문단까지(비우면 anchor 문단 하나). 사이의 표·그림 포함.
+    - anchor/target이 문서에 여러 번 있으면 occurrence/target_occurrence(1부터)가 없을 때 복사하지 않고
+      실패(애매함)로 돌려줍니다. end_anchor는 anchor 문단 이후 처음 나오는 곳.
+    - 클립보드를 거치며, 끝나면 작업 전 클립보드의 글자를 되돌려 놓습니다.
+    """
+    if unit not in DUPLICATE_UNITS:
+        return False, f"unit은 {list(DUPLICATE_UNITS)} 중 하나여야 합니다."
+    if position not in DUPLICATE_POSITIONS:
+        return False, f"position은 {list(DUPLICATE_POSITIONS)} 중 하나여야 합니다."
+    if not anchor or not target:
+        return False, "anchor와 target이 필요합니다."
+    if end_anchor and unit != "paragraphs":
+        return False, "end_anchor는 unit=\"paragraphs\"일 때만 씁니다."
+    for name, txt, occ, occ_name in (("anchor", anchor, occurrence, "occurrence"),
+                                     ("target", target, target_occurrence, "target_occurrence")):
+        n = _count_in_text(text_reader, txt)
+        if n is not None and n > 1 and not occ:
+            return False, (f"{name} '{txt}'가 {n}곳에서 일치합니다. 앞뒤 글자를 넉넉히 넣거나 "
+                           f"{occ_name}(1부터)로 몇 번째인지 지정하세요.")
+        if n is not None and occ and occ > n:
+            return False, f"{name} '{txt}'는 {n}곳뿐입니다({occ_name}={occ})."
+
+    saved_clip = _clipboard_text()
+    try:
+        if unit == "table":
+            ok, what = _select_table_at_anchor(h, anchor, occurrence or 1)
+        else:
+            ok, what = _select_paragraphs(h, anchor, end_anchor, occurrence or 1)
+        if not ok:
+            h.HAction.Run("Cancel")
+            return False, what
+        h.HAction.Run("Copy")
+        h.HAction.Run("Cancel")
+
+        if not find_nth(h, target, target_occurrence or 1):
+            return False, f"붙여넣을 기준 글자를 찾지 못했습니다: {target}"
+        if unit == "table":
+            if position == "para_after":
+                h.HAction.Run("MoveParaEnd")
+                h.HAction.Run("BreakPara")
+                h.HAction.Run("Paste")
+            else:
+                h.HAction.Run("MoveParaBegin")
+                h.HAction.Run("Paste")
+                h.HAction.Run("BreakPara")
+        else:
+            if position == "para_after":
+                cur_para = h.GetPos()[1]
+                if h.HAction.Run("MoveNextParaBegin") and h.GetPos()[1] > cur_para:
+                    h.HAction.Run("Paste")
+                else:  # 마지막 문단 뒤
+                    h.HAction.Run("MoveParaEnd")
+                    h.HAction.Run("BreakPara")
+                    h.HAction.Run("Paste")
+            else:
+                h.HAction.Run("MoveParaBegin")
+                h.HAction.Run("Paste")
+        where = "뒤" if position == "para_after" else "앞"
+        return True, f"{what}를 복사해 '{target}' 문단 {where}에 붙여넣었습니다."
+    finally:
+        _restore_clipboard_text(saved_clip)

@@ -233,3 +233,36 @@ def test_get_text_range_uses_message_box_wrapper():
     calls = [k.args[0] for k in c.hwp.SetMessageBoxMode.call_args_list]
     assert calls == [0x00010000, 0x00000000]
     c.hwp.GetTextFile.assert_called_once_with("UNICODE", "")
+
+
+# ---------------------------------------------------------------- hwp_duplicate 입력 검사
+
+def _dup(**kw):
+    h = MagicMock()
+    args = dict(unit="table", anchor="남기업", target="ㅇ 자문위원")
+    args.update(kw)
+    return h, eh.duplicate(h, **args)
+
+
+def test_duplicate_rejects_bad_unit_and_position():
+    _, (ok, msg) = _dup(unit="cell")
+    assert not ok and "unit" in msg
+    _, (ok, msg) = _dup(position="after_match")
+    assert not ok and "position" in msg
+
+
+def test_duplicate_end_anchor_only_for_paragraphs():
+    _, (ok, msg) = _dup(end_anchor="끝")
+    assert not ok and "paragraphs" in msg
+
+
+def test_duplicate_ambiguous_target_does_not_touch_document():
+    h, (ok, msg) = _dup(text_reader=lambda: "남기업 ... ㅇ 자문위원 ... ㅇ 자문위원")
+    assert not ok and "2곳에서 일치" in msg and "target_occurrence" in msg
+    h.HAction.Run.assert_not_called()
+
+
+def test_duplicate_occurrence_out_of_range():
+    h, (ok, msg) = _dup(occurrence=3, text_reader=lambda: "남기업 남기업 ㅇ 자문위원")
+    assert not ok and "2곳뿐" in msg
+    h.HAction.Run.assert_not_called()

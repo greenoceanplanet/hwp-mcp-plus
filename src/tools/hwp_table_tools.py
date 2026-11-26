@@ -52,7 +52,8 @@ class HwpTableTools:
                 logger.info(f"Successfully inserted {rows}x{cols} table")
                 return f"Table inserted with {rows} rows and {cols} columns"
             else:
-                return "Error: Failed to insert table"
+                reason = getattr(self.hwp_controller, "last_error", "") or "원인 불명"
+                return f"Error: 표를 넣지 못했습니다 - {reason}"
         except Exception as e:
             logger.error(f"Error inserting table: {str(e)}", exc_info=True)
             return f"Error: {str(e)}"
@@ -152,7 +153,8 @@ class HwpTableTools:
             
             # 표 생성
             if not self.hwp_controller.insert_table(rows, cols):
-                return "Error: Failed to create table"
+                reason = getattr(self.hwp_controller, "last_error", "") or "원인 불명"
+                return f"Error: 표를 넣지 못했습니다 - {reason}"
             
             # 데이터가 제공된 경우 표 채우기
             if data:
