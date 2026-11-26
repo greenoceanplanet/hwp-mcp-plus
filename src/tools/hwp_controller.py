@@ -1619,18 +1619,17 @@ class HwpController:
 
     def _create_page_image_raw(self, path: str, page_index: int, resolution: int, fmt: str) -> bool:
         """
-        CreatePageImage를 호출합니다. 커서가 표·글상자 등 본문 밖 목록에 있으면 한글이 실패하므로,
-        그때는 커서를 잠시 본문 처음으로 옮겨 다시 시도하고 원래 위치로 되돌립니다.
+        CreatePageImage를 호출합니다. 커서가 표 셀·글상자 등 본문 밖 목록에 있으면 한글이 실패하거나,
+        성공한 것처럼 그 셀 하나만 그린 그림을 만듦(실측). 그래서 그때는 커서를 잠시 본문 처음으로
+        옮겨 그리고 원래 위치로 되돌립니다.
         """
         def _try() -> bool:
             ok = self.hwp.CreatePageImage(path, page_index, resolution, 24, fmt)
             return bool(ok) and os.path.exists(path)
 
-        if _try():
-            return True
         pos = self.hwp.GetPos()
         if pos[0] == 0:
-            return False
+            return _try()
         try:
             self.hwp.HAction.Run("Cancel")
             self.hwp.SetPos(0, 0, 0)
