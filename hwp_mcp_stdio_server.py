@@ -1040,6 +1040,57 @@ def hwp_table_delete(anchor: str = "", target: str = "row", count: int = 1, trac
         logger.error(f"Error deleting table rows/cols: {str(e)}", exc_info=True)
         return errors.com_error(e)
 
+
+def _table_shape_error(msg: str) -> str:
+    """셀 합치기·나누기 실패 응답. 범위가 맞지 않아 되돌린 경우는 인자 문제로 안내."""
+    if "되돌렸습니다" in msg:
+        return errors.err(errors.INVALID_ARG, msg,
+                          "hwp_table_read로 표 모양(merged 포함)을 확인하고, rows·cols가 표 안에 들어가게 다시 호출하세요.")
+    return errors.from_message(f"Error: {msg}")
+
+
+@mcp.tool()
+@track_edits
+def hwp_table_merge(anchor: str = "", rows: int = 1, cols: int = 2, occurrence: int = 1, track: bool = None) -> str:
+    """
+    표 셀을 합칩니다. anchor가 든 셀을 왼쪽 위로 해서 rows줄 x cols칸 범위를 한 셀로 만듦.
+    - anchor: 기준 셀 안의 글자(occurrence번째). 비우면 현재 커서가 있는 셀.
+    - 예: 가로로 3칸 합치기 rows=1, cols=3 / 세로로 2칸 rows=2, cols=1
+    합친 셀의 글자는 한 셀 안에 문단으로 모입니다. 결과 셀 수가 기대와 다르면(범위가 표 끝을 넘는 등)
+    자동으로 되돌리고 오류를 돌려줍니다. 표 모양은 hwp_table_read로 먼저 확인할 것.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.table_merge(hwp.hwp, anchor, rows, cols, occurrence)
+        return msg if ok else _table_shape_error(msg)
+    except Exception as e:
+        logger.error(f"Error merging cells: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
+
+@mcp.tool()
+@track_edits
+def hwp_table_split(anchor: str = "", rows: int = 1, cols: int = 2, occurrence: int = 1, track: bool = None) -> str:
+    """
+    표 셀 하나를 rows줄 x cols칸으로 나눕니다(줄 높이는 같게).
+    - anchor: 나눌 셀 안의 글자(occurrence번째). 비우면 현재 커서가 있는 셀.
+    - 예: 가로로 둘 rows=1, cols=2 / 세로로 셋 rows=3, cols=1
+    셀의 글자는 나눈 셀 중 첫 칸에 남습니다. 결과 셀 수가 기대와 다르면 자동으로 되돌리고 오류를 돌려줍니다.
+    track: 변경추적으로 표시할지. None이면 환경변수 HWP_MCP_TRACK_EDITS(on/off, 기본 on)를 따름. 끝나면 원래 설정으로 되돌림.
+    """
+    try:
+        hwp = get_hwp_controller()
+        if not hwp:
+            return errors.not_running()
+        ok, msg = hwp_edit_helpers.table_split(hwp.hwp, anchor, rows, cols, occurrence)
+        return msg if ok else _table_shape_error(msg)
+    except Exception as e:
+        logger.error(f"Error splitting cell: {str(e)}", exc_info=True)
+        return errors.com_error(e)
+
 @mcp.tool()
 @track_edits
 def hwp_insert_at(anchor: str = "", text: str = "", position: str = "para_after", copy_format_from: str = "", track: bool = None) -> str:

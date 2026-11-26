@@ -355,3 +355,61 @@ def test_leave_table_noop_in_body():
     h.GetPos.return_value = (0, 3, 2)
     assert eh.leave_table(h)
     h.HAction.Run.assert_not_called()
+
+
+# ---------------------------------------------------------------- 셀 합치기·나누기
+
+def _merge_mock(monkeypatch, counts):
+    h = MagicMock()
+    h.GetPos.return_value = (5, 0, 0)  # 표 셀 안
+    h.HAction.Execute.return_value = True
+    h.HAction.Run.return_value = True
+    it = iter(counts)
+    monkeypatch.setattr(eh, "_count_cells", lambda _h: next(it))
+    return h
+
+
+def _runs(h):
+    return [c.args[0] for c in h.HAction.Run.call_args_list]
+
+
+def test_table_merge_runs_block_extend_and_merge(monkeypatch):
+    h = _merge_mock(monkeypatch, [9, 6])  # 2x2 합치기 → 셀 3개 줄어듦
+    ok, msg = eh.table_merge(h, "", rows=2, cols=2)
+    assert ok, msg
+    runs = _runs(h)
+    i = runs.index("TableCellBlock")
+    assert runs[i:i + 4] == ["TableCellBlock", "TableCellBlockExtend", "TableLowerCell", "TableRightCell"]
+    assert "TableMergeCell" in runs and "Undo" not in runs
+
+
+def test_table_merge_undoes_when_cell_count_differs(monkeypatch):
+    h = _merge_mock(monkeypatch, [9, 4])  # 1x2를 요청했는데 5개가 줄어듦(다음 줄로 넘어감)
+    ok, msg = eh.table_merge(h, "", rows=1, cols=2)
+    assert not ok and "되돌렸습니다" in msg
+    assert "Undo" in _runs(h)
+
+
+def test_table_split_sets_rows_cols(monkeypatch):
+    h = _merge_mock(monkeypatch, [9, 11])  # 1x3으로 나누기 → 2개 늘어남
+    ok, msg = eh.table_split(h, "", rows=1, cols=3)
+    assert ok, msg
+    pset = h.HParameterSet.HTableSplitCell
+    assert (pset.Rows, pset.Cols, pset.Merge) == (1, 3, 0)
+    h.HAction.Execute.assert_called_with("TableSplitCell", pset.HSet)
+
+
+@pytest.mark.parametrize("rows,cols", [(1, 1), (0, 2), (2, -1)])
+def test_table_merge_split_reject_bad_size(rows, cols):
+    h = MagicMock()
+    assert not eh.table_merge(h, "", rows, cols)[0]
+    assert not eh.table_split(h, "", rows, cols)[0]
+    h.HAction.Run.assert_not_called()
+
+
+def test_table_merge_outside_table_restores_cursor(monkeypatch):
+    h = _merge_mock(monkeypatch, [])
+    h.GetPos.return_value = (0, 3, 2)  # 본문
+    ok, msg = eh.table_merge(h, "", rows=1, cols=2)
+    assert not ok and "표 안에 있지 않습니다" in msg
+    h.SetPos.assert_called_with(0, 3, 2)

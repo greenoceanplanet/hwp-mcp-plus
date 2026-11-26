@@ -528,6 +528,85 @@ def _fill_current_cell(h, value: str):
     h.HAction.Run("Cancel")
 
 
+def _count_cells(h) -> int:
+    """문서 전체의 표 셀 수(HWPML의 CELL 개수). 병합·나누기가 의도대로 됐는지 확인용."""
+    try:  # hwp_format_helpers가 이 모듈을 불러오므로, 순환 import를 피하려고 여기서 불러옴
+        from src.tools.hwp_format_helpers import read_hwpml
+    except ImportError:
+        from hwp_format_helpers import read_hwpml
+    return read_hwpml(h).count("<CELL ")
+
+
+def _goto_cell(h, anchor: str, occurrence: int):
+    """anchor(occurrence번째)가 든 셀로 커서를 옮깁니다. anchor가 비면 현재 셀. (성공, 오류 메시지)"""
+    if anchor and not find_nth(h, anchor, max(1, occurrence)):
+        return False, f"기준 글자를 찾지 못했습니다: {anchor}"
+    h.HAction.Run("Cancel")
+    if h.GetPos()[0] == 0:
+        return False, f"'{anchor or '현재 커서'}'가 표 안에 있지 않습니다."
+    return True, ""
+
+
+def _table_change(h, anchor, occurrence, expected_delta, run, what):
+    """셀 수가 expected_delta만큼 바뀌는 표 작업 run()을 실행하고, 아니면 되돌립니다. (성공, 메시지)"""
+    saved = save_pos(h)
+    ok, msg = _goto_cell(h, anchor, occurrence)
+    if not ok:
+        restore_pos(h, saved)
+        return False, msg
+    before = _count_cells(h)
+    if not run():
+        h.HAction.Run("Cancel")
+        return False, f"한글이 {what}를 하지 못했습니다(병합된 셀이 섞여 있거나 범위가 표를 벗어났을 수 있음)."
+    h.HAction.Run("Cancel")
+    delta = _count_cells(h) - before
+    if delta != expected_delta:
+        h.HAction.Run("Undo")
+        return False, (f"{what} 결과가 요청과 달라 되돌렸습니다(셀 수 변화 {delta:+d}, 기대 {expected_delta:+d}). "
+                       "범위가 표 끝을 넘거나(다음 줄로 넘어감) 병합된 셀에 걸쳤을 수 있습니다.")
+    return True, f"{what} 완료(셀 {before}→{before + delta}개)."
+
+
+def table_merge(h, anchor: str, rows: int = 1, cols: int = 2, occurrence: int = 1):
+    """anchor가 든 셀을 왼쪽 위로 해서 rows x cols 범위를 한 셀로 합칩니다. (성공, 메시지)
+
+    셀 블록(TableCellBlock) → 블록 연장(TableCellBlockExtend) → 아래·오른쪽으로 넓힘 → TableMergeCell.
+    """
+    rows, cols = int(rows), int(cols)
+    if rows < 1 or cols < 1 or rows * cols < 2:
+        return False, "rows·cols는 1 이상이고, 합칠 셀이 2개 이상이어야 합니다."
+
+    def run():
+        if not h.HAction.Run("TableCellBlock"):
+            return False
+        h.HAction.Run("TableCellBlockExtend")
+        for _ in range(rows - 1):
+            h.HAction.Run("TableLowerCell")
+        for _ in range(cols - 1):
+            h.HAction.Run("TableRightCell")
+        return bool(h.HAction.Run("TableMergeCell"))
+
+    return _table_change(h, anchor, occurrence, -(rows * cols - 1), run, f"셀 합치기({rows}x{cols})")
+
+
+def table_split(h, anchor: str, rows: int = 1, cols: int = 2, occurrence: int = 1):
+    """anchor가 든 셀 하나를 rows줄 x cols칸으로 나눕니다(TableSplitCell). (성공, 메시지)"""
+    rows, cols = int(rows), int(cols)
+    if rows < 1 or cols < 1 or rows * cols < 2:
+        return False, "rows·cols는 1 이상이고, 나눈 결과가 2칸 이상이어야 합니다."
+
+    def run():
+        pset = h.HParameterSet.HTableSplitCell
+        h.HAction.GetDefault("TableSplitCell", pset.HSet)
+        pset.Rows = rows
+        pset.Cols = cols
+        pset.DistributeHeight = 1  # 줄 높이를 같게
+        pset.Merge = 0             # 나누기 전에 합치지 않음(셀 하나만 나눔)
+        return bool(h.HAction.Execute("TableSplitCell", pset.HSet))
+
+    return _table_change(h, anchor, occurrence, rows * cols - 1, run, f"셀 나누기({rows}x{cols})")
+
+
 def leave_table(h) -> bool:
     """커서가 표 셀 안이면 표 바로 뒤로 옮깁니다.
 
