@@ -408,34 +408,29 @@ class HwpController:
                 return False, []
 
             documents = []
+            docs = self.hwp.XHwpDocuments
 
-            # XHwpWindows를 사용하여 열린 윈도우(문서) 목록 가져오기
+            # 활성 문서는 DocumentID로 비교(CurDocIndex는 늦은 바인딩에서 읽히지 않아
+            # 예전에는 항상 0번을 활성으로 표시했음)
+            active_id = None
             try:
-                windows = self.hwp.XHwpWindows
-                window_count = windows.Count
+                active_id = docs.Active_XHwpDocument.DocumentID
             except Exception as e:
-                logger.debug(f"XHwpWindows 접근 실패, XHwpDocuments로 폴백: {e}")
-                window_count = self.hwp.XHwpDocuments.Count
-                windows = self.hwp.XHwpDocuments
+                logger.debug(f"활성 문서 조회 실패 (무시): {e}")
 
-            # 현재 활성 문서 인덱스
-            current_idx = None
-            try:
-                current_idx = self.hwp.CurDocIndex
-            except Exception as e:
-                logger.debug(f"CurDocIndex 조회 실패 (무시): {e}")
-
-            for i in range(window_count):
+            for i in range(docs.Count):
                 try:
-                    doc = windows.Item(i)
-                    doc_path = ""
+                    doc = docs.Item(i)
                     try:
-                        doc_path = doc.Path if doc.Path else "(새 문서)"
+                        doc_path = doc.Path or ""
                     except Exception as e:
                         logger.debug(f"문서 경로 조회 실패: {e}")
-                        doc_path = "(새 문서)"
+                        doc_path = ""
+                    # 저장 안 된 문서는 Path가 비거나 폴더만 들어 있음(실측)
+                    if not doc_path or doc_path.endswith(("\\", "/")):
+                        doc_path = "(저장 안 된 문서)"
 
-                    is_current = (i == current_idx) if current_idx is not None else (i == 0)
+                    is_current = active_id is not None and doc.DocumentID == active_id
                     documents.append({
                         "index": i,
                         "path": doc_path,
@@ -473,21 +468,20 @@ class HwpController:
 
             doc = self.hwp.XHwpDocuments.Item(index)
 
-            # 여러 방법 시도
+            # 늦은 바인딩에서는 SetActive_XHwpDocument만 동작함(실측).
+            # SetActive / SetActive_OnlyStrongHold는 AttributeError.
             try:
-                doc.SetActive_OnlyStrongHold()
-            except Exception as e1:
-                logger.debug(f"SetActive_OnlyStrongHold 실패: {e1}")
-                try:
-                    doc.SetActive()
-                except Exception as e2:
-                    logger.debug(f"SetActive 실패, HAction 사용: {e2}")
-                    self.hwp.HAction.Run("MoveDocBegin")
-                    for _ in range(index):
-                        self.hwp.HAction.Run("WindowNext")
+                doc.SetActive_XHwpDocument()
+            except Exception as e:
+                return False, f"문서 전환 실패: {e}"
+
+            # 실제로 바뀌었는지 확인(예전에는 실패해도 '완료'라고 답했음)
+            active = self.hwp.XHwpDocuments.Active_XHwpDocument
+            if active.DocumentID != doc.DocumentID:
+                return False, "문서 전환 실패: 활성 문서가 바뀌지 않았습니다."
 
             doc_path = doc.Path if doc.Path else "(새 문서)"
-            return True, f"문서 전환 완료: {doc_path}"
+            return True, f"문서 전환 완료: [{index}] {doc_path}"
         except Exception as e:
             return False, f"문서 전환 실패: {e}"
 
