@@ -82,7 +82,7 @@ Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등
 
 - 우선순위: 도구 인자 `track`(True/False) > 환경변수 `HWP_MCP_TRACK_EDITS`(on/off) > 기본 on
 - 프로젝트마다 다르게 쓰려면 그 프로젝트의 `.mcp.json`에서 `env`의 값을 바꿉니다.
-- 새 문서를 만드는 도구(`hwp_create_document_from_text`, `hwp_create_complete_document`, `hwp_create_table_with_data` 등)는 대상이 아닙니다.
+- 새 문서를 만드는 도구(`hwp_create`, `hwp_create_table_with_data` 등)는 대상이 아닙니다.
 - 검토가 끝나면 `hwp_track_changes_resolve("apply_all")`(모두 수락) 또는 `"cancel_all"`(모두 거절).
 
 #### 오류 응답 형식
@@ -157,16 +157,6 @@ hwp_memo("list")                                      # 메모 내용·붙은 �
 hwp_fields("list")                                    # 필드 이름 목록
 hwp_fields("put", values={"성명": "홍길동", "날짜": "2026. 11. 16."})
 hwp_fields("get")                                     # 모든 필드 값
-```
-
-#### 일괄 작업 예시
-```python
-hwp_batch_operations([
-    {"operation": "hwp_create"},
-    {"operation": "hwp_insert_text", "params": {"text": "제목"}},
-    {"operation": "hwp_set_font", "params": {"size": 20, "bold": True}},
-    {"operation": "hwp_save", "params": {"path": "경로/문서명.hwp"}}
-])
 ```
 
 ## 프로젝트 구조

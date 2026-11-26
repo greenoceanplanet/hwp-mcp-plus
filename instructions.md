@@ -9,113 +9,7 @@ This file contains detailed instructions, schemas, syntax guidelines, and exampl
 
 ---
 
-## 1. hwp_create_complete_document
-
-Creates a complete document in a single call using a structured JSON object (`document_spec`).
-
-### Schema of `document_spec`
-```json
-{
-  "title": "Document Title",       // Optional
-  "filename": "save_filename.hwp", // Optional, filename to save as
-  "save": true,                    // Optional, whether to save the file
-  "elements": [                    // Optional if special_type is used
-    {
-      "type": "heading",           // heading | text | paragraph | table
-      "content": "Heading Text",
-      "properties": {
-        "font_size": 16,
-        "bold": true
-      }
-    },
-    {
-      "type": "text",
-      "content": "Paragraph text content...",
-      "properties": {
-        "font_size": 11,
-        "bold": false,
-        "italic": false
-      }
-    },
-    {
-      "type": "paragraph"          // Inserts a line break
-    }
-  ],
-  "special_type": {                // Optional: For generating templated documents
-    "type": "report",              // "report" | "letter"
-    "params": {
-      // For "report":
-      "title": "Report Title",
-      "author": "Author Name",
-      "date": "2026-06-15",
-      "sections": [
-        { "title": "Section 1", "content": "Section 1 content..." }
-      ],
-      // For "letter":
-      "recipient": "Recipient Name",
-      "sender": "Sender Name",
-      "content": "Letter body text..."
-    }
-  }
-}
-```
-
----
-
-## 2. hwp_create_document_from_text
-
-Generates a new document from a single text block, parsing formatting cues automatically.
-
-### Parsing Rules
-*   **Header Line**: If `title` is not provided, the first line is treated as the document title (large bold font).
-*   **Markdown Headings**: Lines starting with `#`, `##`, etc. are converted to headings with appropriate sizes.
-*   **Bullet Points**: Lines starting with `-`, `*`, or `•` are structured as bullet points.
-*   **Linebreaks**: If `preserve_linebreaks` is `true`, standard carriage returns are preserved. Otherwise, paragraphs are wrapped.
-
----
-
-## 3. hwp_batch_operations
-
-Performs multiple actions sequentially in a single MCP request.
-
-### Structure of `operations`
-A list of dictionaries: `[{"operation": "op_name", "params": {...}}, ...]`
-
-### Supported Operations & Parameters
-1.  **create**: Create a new empty document. (No parameters)
-2.  **open**: Open an existing HWP document.
-    *   `path` (str): Absolute file path.
-3.  **save**: Save the active document.
-    *   `path` (str, optional): Save destination. If omitted, saves as `temp_document.hwp`.
-4.  **insert_text**: Insert text at the current cursor.
-    *   `text` (str): Text content.
-    *   `preserve_linebreaks` (bool): Whether to insert paragraphs for `\n`.
-5.  **set_font**: Set font style.
-    *   `name` (str, optional): Font name (e.g., "바탕").
-    *   `size` (int, optional): Font size.
-    *   `bold` (bool): Bold toggle.
-    *   `italic` (bool): Italic toggle.
-    *   `underline` (bool): Underline toggle.
-    *   `select_previous_text` (bool): Apply style to currently/previously selected text.
-6.  **insert_paragraph**: Insert a blank line.
-    *   `count` (int): Number of paragraphs to insert.
-7.  **insert_table**: Insert a blank table or fill it.
-    *   `rows` (int), `cols` (int).
-    *   `data` (list, optional): 2D list of values.
-    *   `has_header` (bool): Treat first row as header.
-8.  **set_table_cell_text**: Populate specific cell.
-    *   `row` (int, 1-indexed), `col` (int, 1-indexed), `text` (str).
-9.  **merge_table_cells**: Merge multiple cells.
-    *   `start_row`, `start_col`, `end_row`, `end_col`.
-10. **get_text**: Extract all text from the document.
-11. **close**: Disconnect and close.
-    *   `save` (bool): Whether to save changes before closing.
-12. **create_document_from_text**: Equivalent to `hwp_create_document_from_text`.
-    *   `content`, `title`, `format_content`, `save_filename`, `preserve_linebreaks`.
-
----
-
-## 4. hwp_table_view
+## 1. hwp_table_view
 
 Provides a structural snapshot of cells around the cursor. 
 
@@ -135,7 +29,7 @@ Returns a dictionary representing surrounding cells:
 
 ---
 
-## 5. hwp_fill_cells
+## 2. hwp_fill_cells
 
 Batch fills multiple table cells using path instructions relative to labels.
 
@@ -161,7 +55,7 @@ Batch fills multiple table cells using path instructions relative to labels.
 
 ---
 
-## 6. hwp_table_insert / hwp_table_delete
+## 3. hwp_table_insert / hwp_table_delete
 
 Insert or delete table rows/columns. Turn on track changes first.
 
@@ -182,7 +76,7 @@ Choose an anchor that is unique in the document (e.g. a number in the row), sinc
 
 ---
 
-## 7. hwp_insert_at
+## 4. hwp_insert_at
 
 Insert text relative to found text. Turn on track changes first (`hwp_set_track_changes(active=True)`).
 
@@ -205,7 +99,7 @@ A new paragraph inherits the anchor paragraph's shape, **including auto bullets*
 
 ---
 
-## 8. hwp_copy_format
+## 5. hwp_copy_format
 
 Copy formatting from one paragraph to another whole paragraph. Turn on track changes first.
 
@@ -218,7 +112,7 @@ Both anchors use the first match from the top of the document, so choose unique 
 
 ---
 
-## 9. Reading text
+## 6. Reading text
 
 `hwp_get_text`, `hwp_get_selection`, `hwp_get_current_paragraph` and `hwp_get_context` read text with `GetTextFile("UNICODE", ...)`. (The `"TEXT"` format returns CP949 bytes packed into a string, which shows Korean as mojibake such as `ÁÖ°Å¾ÈÁ¤`.) Bullets/numbering added by paragraph shape appear as characters (e.g. `● `) at the start of the line in the output; soft line breaks (`BreakLine`) do not appear as line breaks.
 
@@ -228,7 +122,7 @@ Any code calling `GetTextFile` must go through the controller's `_get_text_file_
 
 ---
 
-## 10. hwp_page_image
+## 7. hwp_page_image
 
 Render one page of the current document to an image exactly as Hangul draws it (uses `CreatePageImage`). Unsaved edits are included.
 
@@ -241,7 +135,7 @@ Note: Hangul's `CreatePageImage` itself only writes `bmp`/`gif` and takes a 0-ba
 
 ---
 
-## 11. hwp_insert_image / hwp_replace_image / hwp_delete_image
+## 8. hwp_insert_image / hwp_replace_image / hwp_delete_image
 
 Insert or replace a picture. The picture is **embedded** in the document (not linked) and **treated as a character** (`TreatAsChar`, 글자처럼 취급), so it flows with the text.
 
@@ -268,7 +162,7 @@ Pictures are found by `CtrlID == "gso"` and `UserDesc == "그림"` (or containin
 
 ---
 
-## 12. hwp_fill_table_grid
+## 9. hwp_fill_table_grid
 
 Fill a whole table at once, row-major from the top-left cell, keeping each cell's character format. Turn on track changes first.
 
