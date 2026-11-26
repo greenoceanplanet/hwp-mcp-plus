@@ -1,0 +1,35 @@
+# 버전 태그(v0.2.0 등)를 push하면 PyPI에 배포
+# 사전 준비: PyPI에서 Trusted Publisher 등록 (workflow: publish.yml, environment: pypi)
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI Trusted Publishing(토큰 없이 인증)에 필요
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: 태그와 pyproject.toml 버전 일치 확인
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$TAG" != "$VER" ]; then
+            echo "태그($TAG)와 pyproject.toml 버전($VER)이 다릅니다." >&2
+            exit 1
+          fi
+
+      - name: 빌드
+        run: uv build
+
+      - name: PyPI 배포
+        run: uv publish

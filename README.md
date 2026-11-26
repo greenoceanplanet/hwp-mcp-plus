@@ -27,14 +27,14 @@ HWP-MCP Plus는 한글 워드 프로세서(HWP)를 Claude와 같은 AI 모델이
 
 ## 설치 방법
 
-1. 저장소 클론:
+두 가지 방법이 있습니다.
+
+- **방법 A (일반 사용자, 자동 업데이트)**: 별도 설치 없이 아래 "Claude와 함께 사용하기"의 uvx 설정만 넣으면 됩니다. Claude를 다시 켤 때마다 PyPI의 최신 버전을 받아 실행합니다.
+- **방법 B (코드를 직접 고쳐 쓰는 경우)**: 저장소를 받아 로컬에서 실행합니다. 업데이트는 `git pull`로 직접 받습니다.
+
 ```bash
 git clone https://github.com/greenoceanplanet/hwp-mcp-plus.git
 cd hwp-mcp-plus
-```
-
-2. 의존성 설치:
-```bash
 uv sync          # Python 의존성 (.venv 생성)
 ```
 
@@ -42,14 +42,32 @@ uv sync          # Python 의존성 (.venv 생성)
 
 ### Claude와 함께 사용하기
 
-Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등록하세요:
+Claude 데스크톱 설정 파일에 다음과 같이 HWP-MCP Plus 서버를 등록하세요.
+
+방법 A (uvx, 최신 버전 자동 사용):
+
+```json
+{
+  "mcpServers": {
+    "hwp": {
+      "command": "uvx",
+      "args": ["hwp-mcp-plus@latest"],
+      "env": { "HWP_MCP_TRACK_EDITS": "on" }
+    }
+  }
+}
+```
+
+특정 버전에 고정하려면 `"hwp-mcp-plus==0.1.0"`처럼 적습니다.
+
+방법 B (로컬 소스 실행):
 
 ```json
 {
   "mcpServers": {
     "hwp": {
       "command": "uv",
-      "args": ["run", "--directory", "경로/hwp-mcp-plus", "hwp_mcp_stdio_server.py"],
+      "args": ["run", "--directory", "경로/hwp-mcp-plus", "hwp-mcp-plus"],
       "env": { "HWP_MCP_TRACK_EDITS": "on" }
     }
   }

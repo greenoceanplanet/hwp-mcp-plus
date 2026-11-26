@@ -1,13 +1,41 @@
 [project]
 name = "hwp-mcp-plus"
 version = "0.1.0"
+description = "한글(HWP) 프로그램을 Claude 등 MCP 클라이언트에서 조작하는 MCP 서버 (Windows 전용)"
+readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+]
 dependencies = [
     "comtypes>=1.1.14",
     "mcp>=1.2,<2",
     "pillow>=13.0.0",
     "pywin32>=228",
 ]
+
+[project.urls]
+Homepage = "https://github.com/greenoceanplanet/hwp-mcp-plus"
+Issues = "https://github.com/greenoceanplanet/hwp-mcp-plus/issues"
+
+# 진입점: `hwp-mcp-plus` 명령을 실행하면 hwp_mcp_stdio_server.main()이 호출됨
+[project.scripts]
+hwp-mcp-plus = "hwp_mcp_stdio_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 배포 패키지(wheel)에 넣을 파일: 서버 파일, src 패키지(테스트 제외), 보안 모듈 DLL
+# (force-include를 쓰면 로컬 개발 설치에서 파일이 복사되어 수정이 반영되지 않으므로 only-include 사용)
+[tool.hatch.build.targets.wheel]
+only-include = ["src", "hwp_mcp_stdio_server.py", "security_module"]
+exclude = ["src/__tests__"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "hwp_mcp_stdio_server.py", "security_module", "README.md", "pyproject.toml"]
+exclude = ["src/__tests__"]
 
 [dependency-groups]
 dev = [
